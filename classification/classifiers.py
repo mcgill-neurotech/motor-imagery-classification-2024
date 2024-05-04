@@ -14,7 +14,7 @@ from sklearn.feature_selection import SelectKBest, mutual_info_classif
 from sklearn.metrics import ConfusionMatrixDisplay
 from mne.decoding import CSP
 import torch
-from .loaders import EEGDataset, subject_dataset
+from loaders import EEGDataset, subject_dataset
 from torch import nn,optim
 from torch.utils.data import DataLoader
 from lightning import Fabric
@@ -382,9 +382,12 @@ class CSPClassifier(Classifier):
 class DeepClassifier:
     def __init__(self,
                  model,
-                 mat_dataset,
+                 dataset_path,
+                 pickled,
+                 dataset_save_path,
                  train_split,
                  test_split,
+                 dataset_type,
                  batch_size=32, 
                  t_baseline=0, 
                  t_epoch=9, 
@@ -396,21 +399,36 @@ class DeepClassifier:
         self.t_epoch = t_epoch
         self.t_baseline = t_baseline
         self.batch_size = batch_size
-        self.train_loader = self.get_loader(mat_dataset,train_split, batch_size)
-        self.val_loader = self.get_loader(mat_dataset,test_split,batch_size)
-        self.dataset = mat_dataset
+        self.dataset_type = dataset_type
+        self.pickled = pickled
+
+        self.train_loader = self.get_loader(dataset_type,dataset_path,
+                                            train_split, batch_size,
+                                            label="train",
+                                            path=dataset_save_path)
+        self.val_loader = self.get_loader(dataset_type,dataset_path,
+                                          test_split,batch_size,
+                                          label="validation",
+                                          path=dataset_save_path)
+        self.dataset_path = dataset_path
         self.model = model
         self.init_weights = copy.deepcopy(self.model.state_dict())
         self.index_cutoff = index_cutoff
 
-    def get_loader(self,dataset,splits,batch_size,shuffle=True):
-        dset = EEGDataset(dataset,splits,fs=self.fs,t_baseline=self.t_baseline,t_epoch=
-                          self.t_epoch)
+    def get_loader(self,
+                   dataset_type: EEGDataset,
+                   dataset,
+                   splits,
+                   batch_size,
+                   label,
+                   path,
+                   shuffle=True):
+        dset = dataset_type(dataset=dataset,subject_splits=splits,
+                            save_path=os.path.join(path,label),
+                            pickled=self.pickled,fs=self.fs,
+                            t_baseline=self.t_baseline,
+                            t_epoch=self.t_epoch)
         return DataLoader(dset,batch_size,shuffle=shuffle)
-
-    def get_val_loader(self, mat_dataset):
-        val_dataset = EEGDataset(mat_dataset, train=False, fs=self.fs, t_baseline=self.t_baseline, t_epoch=self.t_epoch)
-        return DataLoader(val_dataset, batch_size=self.batch_size, shuffle=False)
 
     def fit(self,
             fabric:Fabric, 
