@@ -7,6 +7,11 @@ from scipy.signal import filtfilt, iirnotch, butter
 from einops import rearrange
 import os
 import scipy
+from sklearn.svm import SVC
+from sklearn.pipeline import Pipeline
+from mne.decoding import CSP
+from sklearn.feature_selection import SelectKBest, mutual_info_classif
+from sklearn.metrics import accuracy_score, confusion_matrix, cohen_kappa_score
 
 def load_data(folder,idx):
 
@@ -144,11 +149,18 @@ class subject_dataset:
 		"""
 		return x
 	
-	def epoch_preprocess(self,x,y):
+	def epoch_preprocess(self,x,y,notch_freq=50):
 		"""
 		Apply pre-processing before concatenating everything in a single array.
 		Easier to manage multiple splits
+		By default, it only applies a notch filter at 50 Hz
 		"""
+
+		n,d,t = x.shape
+		x = rearrange(x,"n t d -> (n d) t")
+		b,a = iirnotch(notch_freq,30,self.fs)
+		x = filtfilt(b,a,x)
+		x = rearrange(x,"(n d) t -> n t d",n=n)
 		return x,y
 	
 class CSP_subject_dataset(subject_dataset):
@@ -197,7 +209,8 @@ class EEGDataset(Dataset):
 				 t_epoch:float = 9,
 				 start:float = 3.5,
 				 length:float = 2,
-				 channels:Iterable = np.array([0,1,2])):
+				 channels:Iterable = np.array([0,1,2]),
+				 sanity_check:bool=False):
 		
 		"""
 		Args:
@@ -212,6 +225,7 @@ class EEGDataset(Dataset):
 			start: start of data
 			length: duration of data
 			channels: chanel indices to include
+			sanity_check: test classification score with CSP
 		"""
 		
 		self.fs = fs
@@ -225,11 +239,33 @@ class EEGDataset(Dataset):
 
 		self.set_epoch(start,length)
 
+		if sanity_check:
+			self.sanity_check()
+
 	def __len__(self):
 		return self.data[0].shape[0]
 
 	def __getitem__(self, idx):
 		return self.data[0][idx,:,int(self.input_start*250):int(self.input_end*250)], self.data[1][idx]
+
+	def sanity_check(self):
+
+		x,y = self.data[0][:,:,int(self.input_start*250):int(self.input_end*250)], self.data[1]
+		x = np.float64(x)
+		print(x.shape)
+		csp = CSP(n_components=x.shape[1],reg=None,log=True,norm_trace=False)
+		svm = SVC(C=1)
+
+		clf = Pipeline(steps=[("csp",csp),
+							("classification",svm)])
+		
+		clf.fit(x,y)
+
+		y_pred = clf.predict(x)
+		acc = accuracy_score(y,y_pred)
+		confusion = confusion_matrix(y,y_pred,normalize="true")
+		print(acc)
+		print(confusion)
 
 	def save_dataset(self,
 				  dataset:dict,
@@ -286,6 +322,17 @@ class EEGDataset(Dataset):
 		self.input_start = start + self.t_baseline
 		self.input_end = self.input_start + length
 	
+	
+	def filter(self,
+			x,
+			notch_freq=50):
+		
+		nyquist = self.fs/2
+		b,a = iirnotch(notch_freq,30,self.fs)
+		x = filtfilt(b,a,x)
+		return x
+
+
 	def filter(self,
 			x,
 			notch_freq=50):
@@ -297,12 +344,9 @@ class EEGDataset(Dataset):
 
 	def preprocess(self,x,y):
 		"""
-		Apply filters and additional preprocessing to measurements
+		Apply filters and additional preprocessing
 		"""
-		n,t,d = x.shape
-		x = rearrange(x,"n d t -> (n d) t")
-		x = self.filter(x)
-		x = rearrange(x,"(n d) t -> n d t",n=n)
+
 		return x,y
 	
 if __name__ == "__main__":
@@ -324,9 +368,11 @@ if __name__ == "__main__":
 					  dataset=None,
 					  save_path=save_path,
 					  dataset_type=CSP_subject_dataset,
-					  channels=channels)
+					  channels=channels,
+					  sanity_check=True)
 	
 	test_dataset = EEGDataset(subject_splits=test_split,
 					  dataset=None,
 					  save_path=save_path,
-					  channels=channels)
+					  channels=channels,
+					  sanity_check=True)

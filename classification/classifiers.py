@@ -14,12 +14,21 @@ from sklearn.feature_selection import SelectKBest, mutual_info_classif
 from sklearn.metrics import ConfusionMatrixDisplay
 from mne.decoding import CSP
 import torch
-from loaders import EEGDataset, subject_dataset
+from loaders import EEGDataset, subject_dataset, CSP_subject_dataset
 from torch import nn,optim
 from torch.utils.data import DataLoader
 from lightning import Fabric
 from lightning.fabric.wrappers import _FabricModule
 import copy
+from typing import Optional, Iterable
+from einops import reduce
+
+import sys
+
+sys.path.append("../../motor-imagery-classification-2024/")
+
+from loaders import EEGDataset,load_data
+from models.unet.eeg_unets import Unet,UnetConfig, BottleNeckClassifier, Unet1D
 
 def load_data(folder,idx):
     path_train = os.path.join(folder,f"B0{idx}T.mat")
@@ -382,53 +391,68 @@ class CSPClassifier(Classifier):
 class DeepClassifier:
     def __init__(self,
                  model,
-                 dataset_path,
-                 pickled,
-                 dataset_save_path,
-                 train_split,
-                 test_split,
-                 dataset_type,
-                 batch_size=32, 
-                 t_baseline=0, 
-                 t_epoch=9, 
-                 fs=250,
-                 start=3.5,
-                 length=2,
-                 index_cutoff=256):
+                 train_split:list[list[str]],
+                 test_split:list[list[str]],
+                 dataset:Optional[dict] = None,
+				 save_path:Optional[str] = None,
+				 dataset_type: Optional[subject_dataset] = None,
+                 channels:Iterable = np.array([0,1,2]),
+                 batch_size:int = 32, 
+                 fs:float = 250, 
+				 t_baseline:float = 0, 
+				 t_epoch:float = 9,
+				 start:float = 3.5,
+				 length:float = 2,
+                 index_cutoff:int = 256,
+                 sanity_check:bool = False):
         self.fs = fs
         self.t_epoch = t_epoch
         self.t_baseline = t_baseline
         self.batch_size = batch_size
         self.dataset_type = dataset_type
-        self.pickled = pickled
+        self.start = start
+        self.length = length
+        self.channels = channels
+        
+        self.train_loader = self.get_loader(batch_size=batch_size,
+                                            subject_splits=train_split,
+                                            dataset=dataset,
+                                            save_path=save_path,
+                                            dataset_type=dataset_type,
+                                            shuffle=True,
+                                            sanity_check=sanity_check)
 
-        self.train_loader = self.get_loader(dataset_type,dataset_path,
-                                            train_split, batch_size,
-                                            label="train",
-                                            path=dataset_save_path)
-        self.val_loader = self.get_loader(dataset_type,dataset_path,
-                                          test_split,batch_size,
-                                          label="validation",
-                                          path=dataset_save_path)
-        self.dataset_path = dataset_path
+        self.val_loader = self.get_loader(batch_size=batch_size,
+                                            subject_splits=test_split,
+                                            dataset=dataset,
+                                            save_path=save_path,
+                                            dataset_type=dataset_type,
+                                            shuffle=False,
+                                            sanity_check=sanity_check)
+        self.dataset_path = save_path
         self.model = model
         self.init_weights = copy.deepcopy(self.model.state_dict())
         self.index_cutoff = index_cutoff
 
     def get_loader(self,
-                   dataset_type: EEGDataset,
-                   dataset,
-                   splits,
-                   batch_size,
-                   label,
-                   path,
-                   shuffle=True):
-        dset = dataset_type(dataset=dataset,subject_splits=splits,
-                            save_path=os.path.join(path,label),
-                            pickled=self.pickled,fs=self.fs,
-                            t_baseline=self.t_baseline,
-                            t_epoch=self.t_epoch)
+                   batch_size:int,
+                   subject_splits:list[list[str]],
+                   dataset:Optional[dict] = None,
+                   save_path:Optional[str] = None,
+                   dataset_type: Optional[subject_dataset] = None,
+                   shuffle=True,
+                   sanity_check=False):
+        
+        dset = EEGDataset(subject_splits=subject_splits,dataset=dataset,
+                          save_path=save_path,dataset_type=dataset_type,
+                          fs=self.fs,t_baseline=self.t_baseline,
+                          t_epoch=self.t_epoch,start=self.start,
+                          length=self.length,channels=self.channels,
+                          sanity_check=sanity_check)
         return DataLoader(dset,batch_size,shuffle=shuffle)
+    
+    def sample_batch(self):
+        return next(iter(self.train_loader))[0][:, :, :self.index_cutoff]
 
     def fit(self,
             fabric:Fabric, 
@@ -522,3 +546,88 @@ class DeepClassifier:
             outputs = self.model(inputs)
             _, predicted = torch.max(outputs.data, 1)
         return predicted
+    
+class MLPClassifier(nn.Module):
+    def __init__(self, input_channels):
+        super(MLPClassifier, self).__init__()
+        self.conv = nn.Conv1d(input_channels,32,3)
+        self.fc = nn.Linear(32, 2) 
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = reduce(x,"batch channel ... -> batch channel","mean")
+        x = self.fc(x)
+        return x
+    
+    def classify(self,x):
+        return self.forward(x)
+
+if __name__ == "__main__":
+
+    dataset = {}
+    for i in range(1,10):
+        mat_train,mat_test = load_data("../data/2b_iv",i)
+        dataset[f"subject_{i}"] = {"train":mat_train,"test":mat_test}
+
+    save_path = "../data/2b_iv/csp"
+
+    train_split = 3*[["train","test"]] + 6*[["train"]]
+    test_split = 3*[[]] + 6* [["test"]]
+
+    channels = np.split(np.arange(0,6*9),6)
+    channels = np.concatenate([channels[0],channels[2]])
+    
+    model = MLPClassifier(18)
+
+    csp_config = UnetConfig(
+        input_shape=(256),
+        input_channels=18,
+        conv_op=nn.Conv1d,
+        norm_op=nn.InstanceNorm1d,
+        non_lin=nn.ReLU,
+        pool_op=nn.AvgPool1d,
+        up_op=nn.ConvTranspose1d,
+        starting_channels=32,
+        max_channels=256,
+        conv_group=1,
+        conv_padding=(1),
+        conv_kernel=(3),
+        pool_fact=2,
+        deconv_group=1,
+        deconv_padding=(0),
+        deconv_kernel=(2),
+        deconv_stride=(2),
+        residual=True
+    )
+
+    mlp = BottleNeckClassifier((4096,512))
+    model = Unet(csp_config,mlp)
+
+    clf = DeepClassifier(model=model,
+                         train_split=train_split,
+                         test_split=test_split,
+                         dataset=None,
+                         save_path=save_path,
+                         dataset_type=CSP_subject_dataset,
+                         channels=channels,
+                         batch_size=32,
+                         fs=250,
+                         t_baseline=0,
+                         t_epoch=9,
+                         start=3.5,
+                         length=2.05,
+                         index_cutoff=512,
+                         sanity_check=False)
+    
+    torch.set_float32_matmul_precision("medium")
+    
+    fabric = Fabric(accelerator="cuda",precision="bf16-mixed")
+    fabric.launch()
+
+    print(clf.sample_batch().shape)
+    
+    clf.fit(fabric=fabric,
+            num_epochs=50,
+            lr=1E-3,
+            weight_decay=1E-3,
+            verbose=True)
