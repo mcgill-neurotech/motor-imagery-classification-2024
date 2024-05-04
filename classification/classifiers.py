@@ -14,7 +14,6 @@ from sklearn.feature_selection import SelectKBest, mutual_info_classif
 from sklearn.metrics import ConfusionMatrixDisplay
 from mne.decoding import CSP
 import torch
-from loaders import EEGDataset, subject_dataset, CSP_subject_dataset
 from torch import nn,optim
 from torch.utils.data import DataLoader
 from lightning import Fabric
@@ -27,7 +26,7 @@ import sys
 
 sys.path.append("../../motor-imagery-classification-2024/")
 
-from loaders import EEGDataset,load_data
+from classification.loaders import EEGDataset, subject_dataset, CSP_subject_dataset
 from models.unet.eeg_unets import Unet,UnetConfig, BottleNeckClassifier, Unet1D
 
 def load_data(folder,idx):
@@ -391,10 +390,10 @@ class CSPClassifier(Classifier):
 class DeepClassifier:
     def __init__(self,
                  model,
+                 save_paths:list[str],
                  train_split:list[list[str]],
                  test_split:list[list[str]],
                  dataset:Optional[dict] = None,
-				 save_path:Optional[str] = None,
 				 dataset_type: Optional[subject_dataset] = None,
                  channels:Iterable = np.array([0,1,2]),
                  batch_size:int = 32, 
@@ -417,7 +416,7 @@ class DeepClassifier:
         self.train_loader = self.get_loader(batch_size=batch_size,
                                             subject_splits=train_split,
                                             dataset=dataset,
-                                            save_path=save_path,
+                                            save_paths=save_paths,
                                             dataset_type=dataset_type,
                                             shuffle=True,
                                             sanity_check=sanity_check)
@@ -425,7 +424,7 @@ class DeepClassifier:
         self.val_loader = self.get_loader(batch_size=batch_size,
                                             subject_splits=test_split,
                                             dataset=dataset,
-                                            save_path=save_path,
+                                            save_paths=save_paths,
                                             dataset_type=dataset_type,
                                             shuffle=False,
                                             sanity_check=sanity_check)
@@ -435,16 +434,16 @@ class DeepClassifier:
         self.index_cutoff = index_cutoff
 
     def get_loader(self,
+                   save_paths:list[str],
                    batch_size:int,
                    subject_splits:list[list[str]],
                    dataset:Optional[dict] = None,
-                   save_path:Optional[str] = None,
                    dataset_type: Optional[subject_dataset] = None,
                    shuffle=True,
                    sanity_check=False):
         
         dset = EEGDataset(subject_splits=subject_splits,dataset=dataset,
-                          save_path=save_path,dataset_type=dataset_type,
+                          save_paths=save_paths,dataset_type=dataset_type,
                           fs=self.fs,t_baseline=self.t_baseline,
                           t_epoch=self.t_epoch,start=self.start,
                           length=self.length,channels=self.channels,
@@ -561,6 +560,84 @@ class MLPClassifier(nn.Module):
     
     def classify(self,x):
         return self.forward(x)
+    
+    
+class SimpleCSP:
+
+    def __init__(self,
+                 save_paths:list[str],
+                 train_split:list[list[str]],
+                 test_split:list[list[str]],
+                 dataset:Optional[dict] = None,
+				 dataset_type: Optional[subject_dataset] = None,
+                 channels:Iterable = np.array([0,1,2]),
+                 fs:float = 250, 
+				 t_baseline:float = 0, 
+				 t_epoch:float = 9,
+				 start:float = 3.5,
+				 length:float = 2.05,
+                 sanity_check:bool = False):
+        
+        self.fs = fs
+        self.t_epoch = t_epoch
+        self.t_baseline = t_baseline
+        self.dataset_type = dataset_type
+        self.start = start
+        self.length = length
+        self.channels = channels
+
+        self.train_set = EEGDataset(subject_splits=train_split,dataset=dataset,
+                          save_paths=save_paths,dataset_type=dataset_type,
+                          fs=self.fs,t_baseline=self.t_baseline,
+                          t_epoch=self.t_epoch,start=self.start,
+                          length=self.length,channels=self.channels,
+                          sanity_check=sanity_check)
+        
+        self.test_set = EEGDataset(subject_splits=test_split,dataset=dataset,
+                          save_paths=save_paths,dataset_type=dataset_type,
+                          fs=self.fs,t_baseline=self.t_baseline,
+                          t_epoch=self.t_epoch,start=self.start,
+                          length=self.length,channels=self.channels,
+                          sanity_check=sanity_check)
+        
+        self.set_epoch(start,length)
+    
+    def set_epoch(self,start,length):
+        self.input_start = start + self.t_baseline
+        self.input_end = self.input_start + length
+
+    def fit(self,
+            data = None):
+
+        if data is None:
+            x_train,y_train = self.train_set.data[0], self.train_set.data[1]
+        else:
+            x_train,y_train = data
+
+        x_test,y_test = self.test_set.data[0], self.test_set.data[1]
+        x_train = np.float64(x_train)
+        x_test = np.float64(x_test)
+
+        print(f"input shape: {x_train.shape}")
+
+        csp = CSP(n_components=x_train.shape[1],reg=None,log=True,norm_trace=False)
+        svm = SVC(C=1)
+
+        clf = Pipeline(steps=[("csp",csp),
+                            ("classification",svm)])
+
+        clf.fit(x_train,y_train)
+
+        y_discrete = clf.predict(x_test)
+            
+        acc = accuracy_score(y_test,y_discrete)
+        # confusion = confusion_matrix(y_test,y_discrete,normalize="true") 
+        # kappa = cohen_kappa_score(y_discrete,y_test) 
+
+        return acc
+    
+    def get_train(self):
+        return self.train_set.data[0], self.train_set.data[1]
 
 if __name__ == "__main__":
 
@@ -571,8 +648,8 @@ if __name__ == "__main__":
 
     save_path = "../data/2b_iv/csp"
 
-    train_split = 3*[["train","test"]] + 6*[["train"]]
-    test_split = 3*[[]] + 6* [["test"]]
+    train_split = 6*[["train","test"]] + 3*[["train"]]
+    test_split = 6*[[]] + 3* [["test"]]
 
     channels = np.split(np.arange(0,6*9),6)
     channels = np.concatenate([channels[0],channels[2]])
@@ -607,7 +684,7 @@ if __name__ == "__main__":
                          train_split=train_split,
                          test_split=test_split,
                          dataset=None,
-                         save_path=save_path,
+                         save_paths=[save_path],
                          dataset_type=CSP_subject_dataset,
                          channels=channels,
                          batch_size=32,

@@ -202,7 +202,7 @@ class EEGDataset(Dataset):
 	def __init__(self,
 			     subject_splits:list[list[str]],
 				 dataset:Optional[dict] = None,
-				 save_path:Optional[str] = None,
+				 save_paths:Optional[list[str]] = None,
 				 dataset_type: Optional[subject_dataset] = None,
 				 fs:float = 250, 
 				 t_baseline:float = 0, 
@@ -215,7 +215,7 @@ class EEGDataset(Dataset):
 		"""
 		Args:
 			subject_splits: splits to use for train and test
-			save_path: path to save/load pre-processed data
+			save_path: path(s) to save/load pre-processed data
 			dataset: dictionnary of train and test splits for all subjects
 			dataset_type: type of subject dataset for pre-processing
 			pickled: load pickled dataset instead of saving
@@ -231,13 +231,14 @@ class EEGDataset(Dataset):
 		self.fs = fs
 		self.t_baseline = t_baseline
 		self.t_epoch = t_epoch
-		if dataset is None:
-			self.data = self.load_data(save_path,subject_splits,channels)
-		else:
-			self.save_dataset(dataset,save_path,dataset_type)
-			self.data = self.load_data(save_path,subject_splits,channels)
 
 		self.set_epoch(start,length)
+
+		if dataset is None:
+			self.data = self.load_data(save_paths,subject_splits,channels)
+		else:
+			self.save_dataset(dataset,save_paths[0],dataset_type)
+			self.data = self.load_data(save_paths,subject_splits,channels)
 
 		if sanity_check:
 			self.sanity_check()
@@ -246,11 +247,11 @@ class EEGDataset(Dataset):
 		return self.data[0].shape[0]
 
 	def __getitem__(self, idx):
-		return self.data[0][idx,:,int(self.input_start*250):int(self.input_end*250)], self.data[1][idx]
+		return self.data[0][idx], self.data[1][idx]
 
 	def sanity_check(self):
 
-		x,y = self.data[0][:,:,int(self.input_start*250):int(self.input_end*250)], self.data[1]
+		x,y = self.data[0], self.data[1]
 		x = np.float64(x)
 		print(x.shape)
 		csp = CSP(n_components=x.shape[1],reg=None,log=True,norm_trace=False)
@@ -297,19 +298,22 @@ class EEGDataset(Dataset):
 				np.save(os.path.join(path,f"subject_{idx}_{split}_cues.npy"),cues)
 
 	def load_data(self,
-			   path,
+			   paths,
 			   subject_splits,
 			   channels):
 		
 		epochs = []
 		cues = []
 
-		for idx,splits in enumerate(subject_splits):
-			for split in splits:
-				epochs.append(np.load(os.path.join(path,f"subject_{idx}_{split}_epochs.npy")))
-				cues.append(np.load(os.path.join(path,f"subject_{idx}_{split}_cues.npy")))
+		for path in paths:
+
+			for idx,splits in enumerate(subject_splits):
+				for split in splits:
+					epochs.append(np.load(os.path.join(path,f"subject_{idx}_{split}_epochs.npy")))
+					cues.append(np.load(os.path.join(path,f"subject_{idx}_{split}_cues.npy")))
 
 		epochs = rearrange(np.concatenate(epochs,0),"n t d -> n d t")[:,channels,:]
+		epochs = epochs[:,:,int(self.input_start*250):int(self.input_end*250)]
 		cues = np.concatenate(cues,0)
 
 		print(epochs.shape)
@@ -358,21 +362,23 @@ if __name__ == "__main__":
 
 	save_path = "../data/2b_iv/csp"
 
-	train_split = 3*[["train","test"]] + 6*[["train"]]
-	test_split = 3*[[]] + 6* [["test"]]
+	train_split = 6*[["train","test"]] + 3*[["train"]]
+	test_split = 6*[[]] + 3* [["test"]]
 
 	channels = np.split(np.arange(0,6*9),6)
 	channels = np.concatenate([channels[0],channels[2]])
 
 	train_dataset = EEGDataset(subject_splits=train_split,
-					  dataset=None,
-					  save_path=save_path,
+					  dataset=dataset,
+					  save_paths=[save_path],
 					  dataset_type=CSP_subject_dataset,
 					  channels=channels,
-					  sanity_check=True)
+					  sanity_check=True,
+					  length=2.05)
 	
 	test_dataset = EEGDataset(subject_splits=test_split,
 					  dataset=None,
-					  save_path=save_path,
+					  save_paths=[save_path],
 					  channels=channels,
-					  sanity_check=True)
+					  sanity_check=True,
+					  length=2.05)

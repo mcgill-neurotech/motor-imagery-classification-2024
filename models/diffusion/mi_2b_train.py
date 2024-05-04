@@ -15,10 +15,13 @@ import pickle
 
 import optuna # pip install optuna (this is for the Bayesian optimization and subsequent analysis)
 from lightning.fabric import Fabric
+from einops import repeat
+
 import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), "../.."))
 
-from classification.classifiers import load_data, CSPClassifier, Classifier
+from classification.classifiers import load_data, SimpleCSP
+from classification.loaders import EEGDataset, CSP_subject_dataset
 from ntd.networks import LongConv
 from ntd.diffusion_model import Diffusion
 from ntd.utils.kernels_and_diffusion_utils import WhiteNoiseProcess
@@ -78,11 +81,37 @@ with open(os.path.join(CONF_PATH, "diffusion.yaml"), "r") as f:
 
 ### LOADS THE PREPROCESSED DATA ###
 # Load preprocessed pickled data
-preprocessed_data_path = "../../data/preprocessed_fake.pt"
-preprocessed_data = torch.load(preprocessed_data_path)
-print(preprocessed_data.shape)
-network_yaml["signal_length"] = preprocessed_data.shape[-1]
-network_yaml["signal_channel"] = preprocessed_data.shape[1]
+dataset = {}
+for i in range(1,10):
+    mat_train,mat_test = load_data("../../data/2b_iv",i)
+    dataset[f"subject_{i}"] = {"train":mat_train,"test":mat_test}
+
+REAL_DATA = "../../data/2b_iv/csp"
+
+TRAIN_SPLIT = 6*[["train","test"]] + 3*[["train"]]
+TEST_SPLIT = 6*[[]] + 3* [["test"]]
+
+CHANNELS = np.split(np.arange(0,6*9),6)
+CHANNELS = np.concatenate([CHANNELS[0],CHANNELS[2]])
+
+train_dataset = EEGDataset(subject_splits=TRAIN_SPLIT,
+                    dataset=None,
+                    save_paths=[REAL_DATA],
+                    dataset_type=CSP_subject_dataset,
+                    channels=CHANNELS,
+                    sanity_check=False,
+                    length=2.05)
+
+test_dataset = EEGDataset(subject_splits=TEST_SPLIT,
+                    dataset=None,
+                    save_paths=[REAL_DATA],
+                    channels=CHANNELS,
+                    sanity_check=False,
+                    length=2.05)
+
+print(train_dataset.data[0].shape)
+network_yaml["signal_length"] = train_dataset.data[0].shape[-1]
+network_yaml["signal_channel"] = train_dataset.data[0].shape[1]
 print(network_yaml["signal_length"])
 
 # float-16 can have some stability problems outside of FFT
@@ -103,9 +132,11 @@ def evaluate_generated_signals(classifier_model, generated_signals, labels):
     return accuracy
 
 # GENERATE SIGNALS
-def generate_samples(diffusion_model, condition):
+def generate_samples(diffusion_model, 
+                     condition,
+                     k=5):
     # it's a bit hard to predict memory consumption so splitting in mini-batches to be safe
-    num_samples = 105
+    num_samples = 250
     cond = 0
     if (condition == 0):
         cond = torch.zeros(num_samples, 1, network_yaml["signal_length"]).to(DEVICE)
@@ -118,7 +149,7 @@ def generate_samples(diffusion_model, condition):
     complete_samples = []
     with fabric.autocast():
         with torch.no_grad():
-            for i in range(6):
+            for i in range(k):
                 samples, _ = diffusion_model.sample(num_samples, cond=cond)
                 samples = samples.cpu().numpy()
                 print(samples.shape)
@@ -134,7 +165,8 @@ def objective(trial):
     # Training hyperparameters
 
     print(f"Starting trial {trial.number}")
-    lr = trial.suggest_loguniform('lr', 1e-5, 1e-3)
+    # lr = trial.suggest_loguniform('lr', 1e-5, 1e-3)
+    lr = 6E-4
     # num_epochs = trial.suggest_int('num_epochs', 10, 150)
     num_epochs = 150
     # we don't need to optimize for number of epochs
@@ -142,11 +174,11 @@ def objective(trial):
 
     # Network hyperparameters
     # Note that kernel sizes are same
-    time_dim = trial.suggest_int('time_dim', 10, 18, step=2)
+    time_dim = trial.suggest_int('time_dim', 8, 16, step=4)
     hidden_channel = trial.suggest_int('hidden_channel', 16, 64, step=16)
 
     kernel_size = trial.suggest_int('kernel_size', 15, 65, step=10) 
-    num_scales = trial.suggest_int('num_scales', 1, 5, step=1)
+    num_scales = trial.suggest_int('num_scales', 2, 4, step=1)
 
     # decay_min = trial.suggest_int('decay_min', 1, 4, step=1)
     # decay_max = trial.suggest_int('decay_max', decay_min, 4, step=1)
@@ -180,7 +212,7 @@ def objective(trial):
         
     # Load data
     train_loader = DataLoader(
-        preprocessed_data,
+        train_dataset,
         train_yaml["batch_size"]
     )
 
@@ -229,45 +261,46 @@ def objective(trial):
     min_delta = 0.05
     tolerance = 20
 
-    try:
-        # Train model
-        for i in range(num_epochs):
+    # try:
+    # Train model
+    for i in range(num_epochs):
+        
+        epoch_loss = []
+        for batch in train_loader:
             
-            epoch_loss = []
-            for batch in train_loader:
+            with fabric.autocast():
+            # Repeat the cue signal to match the signal length
+                # print(batch["signal"].shape)
+                signal,cue = batch
+                cond = cue.unsqueeze(-1).unsqueeze(-1).repeat(1, 1, network_yaml["signal_length"]).to(DEVICE)
                 
-                with fabric.autocast():
-                # Repeat the cue signal to match the signal length
-                    # print(batch["signal"].shape)
-                    cond = batch["cue"].unsqueeze(-1).unsqueeze(-1).repeat(1, 1, network_yaml["signal_length"]).to(DEVICE)
-                    
-                    loss = diffusion_model.train_batch(batch["signal"].to(DEVICE), cond=cond)
-                loss = torch.mean(loss)
-                
-                epoch_loss.append(loss.item())
-                
-                fabric.backward(loss)
-                # loss.backward()
-                optimizer.step()
-                optimizer.zero_grad()
-                
-            epoch_loss = np.mean(epoch_loss)
-            loss_per_epoch.append(epoch_loss)
+                loss = diffusion_model.train_batch(signal.to(DEVICE), cond=cond)
+            loss = torch.mean(loss)
             
-            wandb.log({f"loss_{trial.number}": epoch_loss,
-                    f"epoch":i})
-            print(f"Epoch {i} loss: {epoch_loss}")
+            epoch_loss.append(loss.item())
+            
+            fabric.backward(loss)
+            # loss.backward()
+            optimizer.step()
+            optimizer.zero_grad()
+            
+        epoch_loss = np.mean(epoch_loss)
+        loss_per_epoch.append(epoch_loss)
+        
+        wandb.log({f"loss_{trial.number}": epoch_loss,
+                f"epoch":i})
+        print(f"Epoch {i} loss: {epoch_loss}")
 
-            print(f"diff: {epoch_loss - min(loss_per_epoch)}")
+        print(f"diff: {epoch_loss - min(loss_per_epoch)}")
 
-            if epoch_loss - min(loss_per_epoch) >= min_delta*min(loss_per_epoch):
-                stop_counter += 1
-            if stop_counter > tolerance:
-                break
-    except Exception as e:
-        print("Error during training.\nSkipping to next trial.")
-        print(e)
-        return previous_optim_val
+        if epoch_loss - min(loss_per_epoch) >= min_delta*min(loss_per_epoch):
+            stop_counter += 1
+        if stop_counter > tolerance:
+            break
+    # except Exception as e:
+    #     print("Error during training.\nSkipping to next trial.")
+    #     print(e)
+    #     return previous_optim_val
         
     
     # Evaluate synthetic data performance
@@ -275,24 +308,24 @@ def objective(trial):
     generated_signals_one = generate_samples(diffusion_model, condition=1)
     
     accuracies = []
-    kappas = []
-
-    test_classifier = CSPClassifier(dataset_mat_classifier,
-                                        t_baseline=classifier_yaml["t_baseline"],
-                                        t_epoch=classifier_yaml["t_epoch"],
-                                        start=classifier_yaml["start"],
-                                        length=classifier_yaml["length"],)
     
-    full_x,full_y = test_classifier.get_train(cut=True)
-
-    test_classifier.fit((full_x,full_y))
-
-    results = test_classifier.test(verbose=False)
-
-    print(f"reaching an accuracy of {results['test'][-2]}")
+    test_classifier = SimpleCSP(train_split=TRAIN_SPLIT,
+                                test_split=TEST_SPLIT,
+                                dataset=None,
+                                save_paths=[REAL_DATA],
+                                channels=CHANNELS,
+                                length=2.05)
     
-    # already checked at 0 with accuracy of 79%
-    for real_fake_split in range(10, 90, 10):
+    full_x,full_y = test_classifier.get_train()
+
+    print(f"full x shape: {full_x.shape}")
+
+    # acc = test_classifier.fit()
+
+    # print(f"reaching an accuracy of {acc}")
+    
+    # already checked at 0 with a test accuracy of 74%
+    for real_fake_split in range(15, 46, 15):
         
         # Train new classifier with a mix of generated and real data
         
@@ -306,15 +339,14 @@ def objective(trial):
         split_x[0:n//2] = generated_signals_one[0:n//2]
         split_y[0:n//2] = 1
 
-        split_x[n//2:n] = generated_signals_zero[n//2:n]
+        split_x[n//2:n] = generated_signals_zero[0:n//2]
         split_y[n//2:n] = 0
 
-        test_classifier.fit((split_x,split_y))
-        # test_classifier.eval()
-        
-        results = test_classifier.test(verbose=False)
-        accuracies.append(results["test"][-2])
-        kappas.append(results["test"][-1])
+        print(f"split x shape: {split_x.shape}")
+
+        acc = test_classifier.fit((split_x,split_y))
+
+        accuracies.append(acc)
     
     best_split = np.argmax(accuracies)
     best_accuracy = accuracies[best_split]
@@ -324,8 +356,8 @@ def objective(trial):
                "best_split":best_split,
                "trial":trial.number},)
 
-    # Determine if trial should be pruned or not
-    trial.report(best_accuracy, i)
+    # There's not really a point in pruning at the end of the trial
+    trial.report(best_accuracy, num_epochs)
     if trial.should_prune():
         raise optuna.exceptions.TrialPruned()
     
@@ -341,7 +373,7 @@ if __name__ == "__main__":
     pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=20)
     sampler = optuna.samplers.TPESampler(seed=10)
     study = optuna.create_study(direction="maximize", pruner=pruner,sampler=sampler)
-    study.optimize(objective, n_trials=50)
+    study.optimize(objective, n_trials=20)
 
     # Analyze results
     print(f"Best trial: {study.best_trial.params}")
