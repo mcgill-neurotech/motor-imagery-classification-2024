@@ -18,7 +18,8 @@ from lightning.fabric import Fabric
 from einops import repeat
 
 import sys
-sys.path.append(os.path.join(os.path.dirname(__file__), "../.."))
+sys.path.append(os.path.join(os.path.dirname(__file__), "../../"))
+sys.path.append("../../")
 
 from classification.classifiers import load_data, SimpleCSP
 from classification.loaders import EEGDataset, CSP_subject_dataset
@@ -86,13 +87,12 @@ for i in range(1,10):
     mat_train,mat_test = load_data("../../data/2b_iv",i)
     dataset[f"subject_{i}"] = {"train":mat_train,"test":mat_test}
 
-REAL_DATA = "../../data/2b_iv/csp"
+REAL_DATA = "../../data/2b_iv/raw"
 
 TRAIN_SPLIT = 6*[["train","test"]] + 3*[["train"]]
 TEST_SPLIT = 6*[[]] + 3* [["test"]]
 
-CHANNELS = np.split(np.arange(0,6*9),6)
-CHANNELS = np.concatenate([CHANNELS[0],CHANNELS[2]])
+CHANNELS = [0,1,2]
 
 train_dataset = EEGDataset(subject_splits=TRAIN_SPLIT,
                     dataset=None,
@@ -168,16 +168,16 @@ def objective(trial):
     # lr = trial.suggest_loguniform('lr', 1e-5, 1e-3)
     lr = 6E-4
     # num_epochs = trial.suggest_int('num_epochs', 10, 150)
-    num_epochs = 150
+    num_epochs = 180
     # we don't need to optimize for number of epochs
     # we can just check for convergence
 
     # Network hyperparameters
     # Note that kernel sizes are same
-    time_dim = trial.suggest_int('time_dim', 8, 16, step=4)
+    time_dim = 12
     hidden_channel = trial.suggest_int('hidden_channel', 16, 64, step=16)
 
-    kernel_size = trial.suggest_int('kernel_size', 15, 65, step=10) 
+    kernel_size = trial.suggest_int('kernel_size', 35, 65, step=10) 
     num_scales = trial.suggest_int('num_scales', 2, 4, step=1)
 
     # decay_min = trial.suggest_int('decay_min', 1, 4, step=1)
@@ -259,10 +259,11 @@ def objective(trial):
 
     stop_counter = 0
     min_delta = 0.05
-    tolerance = 20
+    tolerance = 30
 
     # try:
     # Train model
+    print(f"training with kernel size {kernel_size}, scale: {num_scales}, hidden_dim: {hidden_channel}")
     for i in range(num_epochs):
         
         epoch_loss = []
@@ -320,11 +321,10 @@ def objective(trial):
 
     print(f"full x shape: {full_x.shape}")
 
-    # acc = test_classifier.fit()
+    acc = test_classifier.fit()
 
-    # print(f"reaching an accuracy of {acc}")
+    print(f"reaching an accuracy of {acc} without fake data")
     
-    # already checked at 0 with a test accuracy of 74%
     for real_fake_split in range(15, 46, 15):
         
         # Train new classifier with a mix of generated and real data
@@ -373,7 +373,7 @@ if __name__ == "__main__":
     pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=20)
     sampler = optuna.samplers.TPESampler(seed=10)
     study = optuna.create_study(direction="maximize", pruner=pruner,sampler=sampler)
-    study.optimize(objective, n_trials=20)
+    study.optimize(objective, n_trials=25)
 
     # Analyze results
     print(f"Best trial: {study.best_trial.params}")

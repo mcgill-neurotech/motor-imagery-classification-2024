@@ -170,6 +170,8 @@ class CSP_subject_dataset(subject_dataset):
 
 	def epoch_preprocess(self, x, y):
 
+		print("preprocessing")
+
 		x,y = super().epoch_preprocess(x, y)
 	
 		ax = []
@@ -181,6 +183,7 @@ class CSP_subject_dataset(subject_dataset):
 		mu = np.mean(x,axis=-1)
 		sigma = np.std(x,axis=-1)
 		x = (x-rearrange(mu,"n d -> n d 1"))/rearrange(sigma,"n d -> n d 1")
+		print(x.shape)
 		return x,y
 	
 	def bandpass(self,
@@ -203,7 +206,9 @@ class EEGDataset(Dataset):
 			     subject_splits:list[list[str]],
 				 dataset:Optional[dict] = None,
 				 save_paths:Optional[list[str]] = None,
+				 fake_data=None,
 				 dataset_type: Optional[subject_dataset] = None,
+				 fake_percentage:float = 0.5,
 				 fs:float = 250, 
 				 t_baseline:float = 0, 
 				 t_epoch:float = 9,
@@ -231,6 +236,7 @@ class EEGDataset(Dataset):
 		self.fs = fs
 		self.t_baseline = t_baseline
 		self.t_epoch = t_epoch
+		self.fake_percentage = fake_percentage
 
 		self.set_epoch(start,length)
 
@@ -240,8 +246,14 @@ class EEGDataset(Dataset):
 			self.save_dataset(dataset,save_paths[0],dataset_type)
 			self.data = self.load_data(save_paths,subject_splits,channels)
 
+		if fake_data is not None:
+			print("we have fake data")
+			self.data = self.load_fake(*fake_data)
+
 		if sanity_check:
 			self.sanity_check()
+
+		print(f"final data shape: {self.data[0].shape}")
 
 	def __len__(self):
 		return self.data[0].shape[0]
@@ -322,6 +334,15 @@ class EEGDataset(Dataset):
 		epochs, cues = self.preprocess(epochs,cues)
 		return ((np.float32(epochs).copy()),cues.copy())
 	
+	def load_fake(self,ones,zeros):
+		epochs,cues = self.data
+		n = int(self.fake_percentage*len(epochs)/2)
+		ones = np.load(ones)[0:n]
+		zeros = np.load(zeros)[0:n]
+		epochs = np.concatenate([epochs,ones,zeros],0)
+		cues = np.concatenate([cues,np.ones(len(ones)),np.zeros(len(zeros))])
+		return ((np.float32(epochs).copy()),cues.copy())
+	
 	def set_epoch(self,start,length):
 		self.input_start = start + self.t_baseline
 		self.input_end = self.input_start + length
@@ -360,18 +381,17 @@ if __name__ == "__main__":
 		mat_train,mat_test = load_data("../data/2b_iv",i)
 		dataset[f"subject_{i}"] = {"train":mat_train,"test":mat_test}
 
-	save_path = "../data/2b_iv/csp"
+	save_path = "../data/2b_iv/raw"
 
 	train_split = 6*[["train","test"]] + 3*[["train"]]
 	test_split = 6*[[]] + 3* [["test"]]
 
-	channels = np.split(np.arange(0,6*9),6)
-	channels = np.concatenate([channels[0],channels[2]])
+	channels = [0,1,2]
 
 	train_dataset = EEGDataset(subject_splits=train_split,
 					  dataset=dataset,
 					  save_paths=[save_path],
-					  dataset_type=CSP_subject_dataset,
+					  dataset_type=subject_dataset,
 					  channels=channels,
 					  sanity_check=True,
 					  length=2.05)
