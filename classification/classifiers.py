@@ -424,7 +424,8 @@ class DeepClassifier:
 
         self.setup_dataloaders(use_fake=True,
                                sanity_check=sanity_check,
-                               fake_percentage=fake_percentage)
+                               fake_percentage=fake_percentage,
+                               test=True)
         
         # self.train_loader = self.get_loader(batch_size=self.batch_size,
         #                                     subject_splits=self.train_split,
@@ -455,7 +456,8 @@ class DeepClassifier:
                    dataset_type: Optional[subject_dataset] = None,
                    shuffle=True,
                    sanity_check=False,
-                   fake_percentage=0.5):
+                   fake_percentage=0.5,
+                   test=False):
         
         dset = EEGDataset(subject_splits=subject_splits,dataset=dataset,
                           save_paths=save_paths,
@@ -466,13 +468,24 @@ class DeepClassifier:
                           t_epoch=self.t_epoch,start=self.start,
                           length=self.length,channels=self.channels,
                           sanity_check=sanity_check)
+        if test:
+            n_val = int(len(dset)*0.5)
+            n_test = len(dset)-n_val
+            val_set,test_set = torch.utils.data.random_split(dset,[n_val,n_test])
+            # val_set = torch.utils.data.Subset(dset,val_idx)
+            # test_set = torch.utils.data.Subset(dset,test_idx)
+            val_loader = DataLoader(val_set,batch_size=batch_size,shuffle=shuffle)
+            test_loader = DataLoader(test_set,batch_size=batch_size,shuffle=shuffle)
+            return val_loader,test_loader
+
         return DataLoader(dset,batch_size,shuffle=shuffle,)
     
     def setup_dataloaders(self,
                           splits=None,
                           use_fake=True,
                           sanity_check=False,
-                          fake_percentage=0.5):
+                          fake_percentage=0.5,
+                          test=False):
         
         if splits is not None:
             train_split = splits[0]
@@ -493,14 +506,26 @@ class DeepClassifier:
                                             sanity_check=sanity_check,
                                             fake_percentage=fake_percentage)
 
-        self.val_loader = self.get_loader(batch_size=self.batch_size,
+        if test:
+            self.val_loader,self.test_loader = self.get_loader(batch_size=self.batch_size,
                                             subject_splits=test_split,
                                             dataset=self.dataset,
                                             save_paths=self.save_paths,
                                             dataset_type=self.dataset_type,
                                             shuffle=False,
                                             sanity_check=sanity_check,
-                                            fake_percentage=fake_percentage)
+                                            fake_percentage=fake_percentage,
+                                            test=test)
+    
+        else:
+            self.val_loader = self.get_loader(batch_size=self.batch_size,
+                                                subject_splits=test_split,
+                                                dataset=self.dataset,
+                                                save_paths=self.save_paths,
+                                                dataset_type=self.dataset_type,
+                                                shuffle=False,
+                                                sanity_check=sanity_check,
+                                                fake_percentage=fake_percentage)
     
     def sample_batch(self):
         return next(iter(self.train_loader))[0][:, :, :self.index_cutoff]
@@ -516,7 +541,9 @@ class DeepClassifier:
             stop_threshold=None,
             log=False,
             id=None,
-            forward_fn=None):
+            forward_fn=None,
+            test=False,
+            setup_test=True):
         self.model.load_state_dict(self.init_weights)
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         criterion = nn.CrossEntropyLoss()
@@ -532,6 +559,9 @@ class DeepClassifier:
 
         stop_counter = 0
         stop_threshold = num_epochs if stop_threshold is None else stop_threshold
+
+        checkpoint = copy.deepcopy(self.model.state_dict())
+        val_losses = [10]
 
         for epoch in range(num_epochs):
             self.model.train()
@@ -575,6 +605,16 @@ class DeepClassifier:
 
                 val_accuracy = 100 * correct / total
 
+                avg_val_loss = val_loss/len(self.val_loader)
+
+                if avg_val_loss < min(val_losses):
+                    print("checkpointing")
+                    checkpoint = copy.deepcopy(self.model.state_dict())
+                else:
+                    print(f"Min loss: {min(val_losses)} vs {avg_val_loss}")
+
+                val_losses.append(avg_val_loss)
+
                 if log:
                     wandb.log({f"epoch_{id}":epoch,
                                f"training_loss_{id}":running_loss/len(self.train_loader),
@@ -599,6 +639,27 @@ class DeepClassifier:
                 
             if stop_counter > stop_threshold:
                 break
+        
+        test_loss = 0.0
+        correct = 0
+        total = 0
+        if test:
+            if setup_test:
+                self.test_loader = fabric.setup_dataloaders(self.test_loader)
+            self.model.load_state_dict(checkpoint)
+            self.model.eval()
+            with torch.no_grad():
+                for inputs, labels in self.test_loader:
+                    labels = labels.to(torch.long)
+                    with fabric.autocast():
+                        inputs, labels = inputs[:, :, :self.index_cutoff], labels
+                        outputs = self.model.classify(inputs)
+                        _, predicted = torch.max(outputs, 1)
+                    total += labels.size(0)
+                    correct += (predicted == labels).sum().item()
+                    test_loss += criterion(outputs, labels).item()
+            test_acc = 100 * correct / total
+            return test_acc
 
         print('Finished Training')
         return max(stats)

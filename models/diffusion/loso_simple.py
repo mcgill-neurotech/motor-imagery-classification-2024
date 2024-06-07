@@ -30,8 +30,7 @@ from classification.loaders import subject_dataset
 from ntd.networks import SinusoidalPosEmb
 from ntd.diffusion_model import Diffusion
 from ntd.utils.kernels_and_diffusion_utils import WhiteNoiseProcess
-
-from u_net_diffusion import DiffusionUnet, DiffusionUnetConfig
+from simple_diff import DiffusionUnet
 
 torch.set_float32_matmul_precision('medium')
 seed_everything(0)
@@ -46,13 +45,12 @@ DEBUG = False
 if DEBUG:
 	print("---\n---\nCurrently in debug mode\n---\n---")
 
-NUM_TIMESTEPS = 1000
+NUM_TIMESTEPS = 100
 DIFFUSION_LR = 6E-4
-CNN_LR = 1E-4
 SCHEDULE = "linear"
 START_BETA = 1E-4
 END_BETA = 8E-2
-DIFFUSION_NUM_EPOCHS = 100 if not DEBUG else 1
+DIFFUSION_NUM_EPOCHS = 180 if not DEBUG else 1
 DIFFUSION_BATCH_SIZE = 64
 CLASSIFICATION_MAX_EPOCHS = 150 if not DEBUG else 1
 CHANNELS = [0,1,2]
@@ -125,8 +123,8 @@ def train_diffusion(fabric,
 	loss_per_epoch = []
 
 	stop_counter = 0
-	min_delta = 0.05
-	tolerance = 20
+	min_delta = 0.075
+	tolerance = 30
 			
 		# Train model
 	for i in range(num_epochs):
@@ -166,13 +164,14 @@ def train_diffusion(fabric,
 			stop_counter += 1
 		if stop_counter > tolerance:
 			break
-		if epoch_loss < 250:
-			break
 
 def check(train_split,
 		  test_split,
 		  fake_paths,
 		  channels=CHANNELS):
+
+	generated_signals_one = np.load(fake_paths[0])
+	generated_signals_zero = np.load(fake_paths[1])
 
 	accuracies = []
 		
@@ -187,23 +186,30 @@ def check(train_split,
 
 	print(f"full x shape: {full_x.shape}")
 
-
-	real_acc = test_classifier.fit(preprocess=True)
+	real_acc = test_classifier.fit()
 
 	print(f"reaching an accuracy of {real_acc} without fake data")
 
-	for real_fake_split in range(25, 100, 25):
+	for real_fake_split in range(15, 46, 15):
 		
-		test_classifier = SimpleCSP(train_split=train_split,
-								test_split=test_split,
-								dataset=None,
-								fake_paths=fake_paths,
-								fake_percentage=real_fake_split/100,
-								save_paths=[REAL_DATA],
-								channels=channels,
-								length=2.05)
+		# Train new classifier with a mix of generated and real data
+		
+		# Change real_fake_split percent of the test_classifier data to generated signals
+		n = int(len(full_x) * real_fake_split / 100)
 
-		acc = test_classifier.fit(preprocess=True)
+		shuffling = np.random.permutation(full_x.shape[0])
+
+		split_x = full_x[shuffling]
+		split_y = full_y[shuffling]
+		split_x[0:n//2] = generated_signals_one[0:n//2]
+		split_y[0:n//2] = 1
+
+		split_x[n//2:2*(n//2)] = generated_signals_zero[0:n//2]
+		split_y[n//2:2*(n//2)] = 0
+
+		print(f"split x shape: {split_x.shape}")
+
+		acc = test_classifier.fit((split_x,split_y))
 
 		accuracies.append(acc)
 					
@@ -218,9 +224,7 @@ def train_classification(fabric,
 						 train_split,
 						 test_split,
 						 train_real,
-						 fine_tune,
-						 subject_id,
-						 w):
+						 fine_tune,):
 	
 	deep_clf = DeepClassifier(
 		model=unet,
@@ -237,14 +241,11 @@ def train_classification(fabric,
 
 	with_fake = deep_clf.fit(fabric=fabric,
 			 num_epochs=CLASSIFICATION_MAX_EPOCHS,
-			 lr=CNN_LR,
+			 lr=1E-3,
 			 weight_decay=1E-4,
-			 verbose=True,
+			 verbose=False,
 			 optimizer=None,
-			 stop_threshold=10,
-			 log=True,
-			 id=f"subject_{subject_id}_percentage_{fake_percentage}_weight_{w}",
-			 test=True)
+			 stop_threshold=25)
 	
 	if fine_tune:
 		print("\n---\nFine-tuning model\n---\n")
@@ -254,11 +255,11 @@ def train_classification(fabric,
 			unet.class_embed,]
 
 		to_optimize = [{"params":i.parameters(),
-			"lr":CNN_LR,
+			"lr":2E-5,
 			"weight_decay":1E-4} for i in to_fine_tune]
 
 		to_optimize.append({"params":unet.auxiliary_clf.parameters(),
-			"lr":CNN_LR,
+			"lr":1E-3,
 			"weight_decay":1E-4})
 
 		optimizer = optim.AdamW(to_optimize)
@@ -269,15 +270,11 @@ def train_classification(fabric,
 	if train_real:
 		without_fake = deep_clf.fit(fabric=fabric,
 				num_epochs=CLASSIFICATION_MAX_EPOCHS,
-				lr=CNN_LR,
+				lr=1E-3,
 				weight_decay=1E-4,
-				verbose=True,
+				verbose=False,
 				optimizer=optimizer,
-				stop_threshold=10,
-				log=True,
-				id=f"subject_{subject_id}_percentage_{0}",
-				test=True,
-				setup_test=False)
+				stop_threshold=25,)
 		
 		return with_fake,without_fake
 	else:
@@ -291,13 +288,9 @@ def loso_trial(fabric,
 			   w,
 			   train=True,
 			   fine_tune=False,
-			   train_real=None,
-			   generate=True):
+			   train_real=None):
 
-	UnetDiff1D = DiffusionUnetConfig(
-		time_dim=12,
-		class_dim=12,
-		num_classes=2,
+	UnetDiff1D = UnetConfig(
 		input_shape=(512),
 		input_channels=3,
 		conv_op=nn.Conv1d,
@@ -317,9 +310,6 @@ def loso_trial(fabric,
 		deconv_stride=(2),
 		residual=True
 	)
-
-	print(f"train split: {train_split}")
-	print(f"test split: {test_split}")
 
 	train_set = EEGDataset(subject_splits=train_split,
                     dataset=None,
@@ -375,50 +365,44 @@ def loso_trial(fabric,
 
 	diffusion_model.load_state_dict(torch.load(os.path.join(save_path,f"unet_diff_{subject_id}.pt")))
 	unet.load_state_dict(torch.load(os.path.join(save_path,f"unet_state_dict_{subject_id}.pt")))
+
+	generated_signals_zero = generate_samples(fabric,diffusion_model, condition=0,n_iter=10,
+										  batch_size=250,w=w)
+	generated_signals_one = generate_samples(fabric,diffusion_model, condition=1,n_iter=10,
+											batch_size=250,w=w)
 	
 	zeros_path = os.path.join(save_path,f"generated_zeros_{w}.npy")
 	ones_path = os.path.join(save_path,f"generated_ones_{w}.npy")
-
-	if generate:
-		generated_signals_zero = generate_samples(fabric,diffusion_model, condition=0,n_iter=6,
-											batch_size=275,w=w)
-		generated_signals_one = generate_samples(fabric,diffusion_model, condition=1,n_iter=6,
-												batch_size=275,w=w)
 	
-		np.save(zeros_path,generated_signals_zero)
-		np.save(ones_path,generated_signals_one)
+	
+	np.save(zeros_path,generated_signals_zero)
+	np.save(ones_path,generated_signals_one)
 
 	fake_paths = [ones_path,zeros_path]
 
-	# csp_real,accuracies = check(train_split=train_split,
-	# 					test_split=test_split,
-	# 					fake_paths=fake_paths,
-	# 					channels=CHANNELS)
+	csp_real,accuracies = check(train_split=train_split,
+						test_split=test_split,
+						fake_paths=fake_paths,
+						channels=CHANNELS)
 	
-	# max_acc = np.argmax(accuracies)
-	# print(f"Reaching a maximal accuracy of {accuracies[max_acc]} for CSP using {(max_acc+1)*25}% fake vs {csp_real}")	
+	max_acc = np.argmax(accuracies)
+	print(f"Reaching a maximal accuracy of {accuracies[max_acc]} for CSP using {(max_acc+1)*15}% fake vs {csp_real}")	
 
-	# results = {"accuracies_csp":accuracies}
-	# results["csp_real"] = csp_real
+	# resetting to randomly initialized model
+	if not fine_tune:
+		classifier = BottleNeckClassifier((2048,1024),)
+		unet = DiffusionUnet(UnetDiff1D,classifier)
 
-	results = {}
+	results = {"accuracies_csp":accuracies}
 
 	cnn_results = {}
 
 	if train_real is not None:
 		print(f"Training without fake data: {train_real}")
 
-	for idx,p in enumerate([0.5]):
-
+	for idx,p in enumerate([0.5,1]):
 		train_real = train_real if train_real is not None else (idx==0)
-
-		classifier = BottleNeckClassifier((2048,1024),)
-		unet = DiffusionUnet(UnetDiff1D,classifier)
-		if fine_tune:
-			unet.load_state_dict(torch.load(os.path.join(save_path,f"unet_state_dict_{subject_id}.pt")))
-
 		if train_real:
-			print("Training both real and fake")
 			fake,real = train_classification(fabric=fabric,
 									unet=unet,
 									fake_percentage=p,
@@ -426,12 +410,10 @@ def loso_trial(fabric,
 									train_split=train_split,
 									test_split=test_split,
 									train_real=train_real,
-									fine_tune=fine_tune,
-									subject_id=subject_id,
-									w=w)
-			cnn_results[f"{subject_id}_real"] = real
+									fine_tune=fine_tune)
+			cnn_results["real"] = real
 			print(f"Reaching an accuracy of {real} without fake data")
-			wandb.log({f"accuracy_{subject_id}_percentage_{0}":real})
+			wandb.log({f"accuracy_{0}":real})
 		else:
 			fake = train_classification(fabric=fabric,
 									unet=unet,
@@ -440,31 +422,25 @@ def loso_trial(fabric,
 									train_split=train_split,
 									test_split=test_split,
 									train_real=train_real,
-									fine_tune=fine_tune,
-									subject_id=subject_id,
-									w=w)
+									fine_tune=fine_tune)
 		print(f"Reaching an accuracy of {fake} with {p} fake")
-		wandb.log({f"accuracy_{subject_id}_percentage_{p}":fake})
-		cnn_results[f"{subject_id}_{p}_{w}"] = fake
+		wandb.log({f"accuracy_{p}":fake})
+		cnn_results[p] = fake
 	
 	results["cnn"] = cnn_results
 	return results
 
 def k_fold(experiment_name,
-		   splits,
 		   k=9,
 		   n=9,
 		   w=3,
 		   train=True,
 		   fine_tune=False,
-		   train_real=None,
-		   generate=True):
+		   train_real=None):
 	
 	fabric = Fabric(accelerator="cuda",precision="bf16-mixed")
-
-	for split in splits:
-		print(f"train: {split[0]}")
-		print(f"test: {split[1]}")
+	
+	splits = k_fold_splits(k,n,leave_out=True)
 
 	results = {}
 
@@ -474,20 +450,19 @@ def k_fold(experiment_name,
 
 		results_k = loso_trial(fabric=fabric,
 			 train_split=split[0],
-			 test_split=split[1],
+			 test_split=split[0],
 			 subject_id=idx,
 			 experiment_name=full_folder,
 			 w=w,
 			 train=train,
 			 fine_tune=fine_tune,
-			 train_real=train_real,
-			 generate=generate)
+			 train_real=train_real)
 		results[f"split_{idx}"] = results_k
 
 	with open(os.path.join(full_folder,f"results_{w}.p"),"wb") as f:
 		pickle.dump(results,f)
 
-if __name__ == "__main__": 
+if __name__ == "__main__":
 
 	parser = argparse.ArgumentParser()
 	parser.add_argument("-n","--name",help="experiment name",type=str)
@@ -498,15 +473,5 @@ if __name__ == "__main__":
 	wandb.init(project="cnn-diffusion-mi", mode="online",
 			name=args.name)
 	
-	splits = k_fold_splits(args.k_fold,n_participants=9,leave_out=False)
-	
-	k_fold(experiment_name=args.name,
-		k=args.k_fold,
-		n=9,
-		splits=splits,w=15,train=False,train_real=None,generate=False,
-		fine_tune=False)
-	k_fold(experiment_name=args.name,
-		k=args.k_fold,
-		n=9,
-		splits=splits,w=15,train=False,train_real=None,generate=False,
-		fine_tune=True)
+	k_fold(args.name,args.k_fold,9,w=0,train=True)
+	k_fold(args.name,args.k_fold,9,w=3,train=False,train_real=False)

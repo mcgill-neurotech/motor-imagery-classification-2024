@@ -259,7 +259,13 @@ class EEGDataset(Dataset):
 		return self.data[0].shape[0]
 
 	def __getitem__(self, idx):
-		return self.data[0][idx], self.data[1][idx]
+		try:
+			return self.data[0][idx], self.data[1][idx]
+		except:
+			print(idx)
+			print(len(idx))
+			print(idx[0].shape)
+			raise ValueError("Invalid type")
 
 	def sanity_check(self):
 

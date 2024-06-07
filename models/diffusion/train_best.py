@@ -56,10 +56,10 @@ for i in range(1,10):
     mat_train,mat_test = load_data("../../data/2b_iv",i)
     dataset[f"subject_{i}"] = {"train":mat_train,"test":mat_test}
 
-REAL_DATA = "../../data/2b_iv/csp"
+REAL_DATA = "../../data/2b_iv/raw"
 
-TRAIN_SPLIT = 8*[["train","test"]]+[[]]
-TEST_SPLIT = 8*[[]]+[["test"]]
+TRAIN_SPLIT = 9*[["train"]]
+TEST_SPLIT = 9*[["test"]]
 
 CHANNELS = [0,1,2]
 
@@ -73,17 +73,17 @@ DIFFUSION_LR = 6E-4
 SCHEDULE = "linear"
 START_BETA = 1E-4
 END_BETA = 8E-2
-DIFFUSION_NUM_EPOCHS = 100 if not DEBUG else 1
+DIFFUSION_NUM_EPOCHS = 180 if not DEBUG else 1
 DIFFUSION_BATCH_SIZE = 64
 CLASSIFICATION_MAX_EPOCHS = 100 if not DEBUG else 1
-c = np.split(np.arange(54),6)
-c = np.concatenate([c[0],c[2]])
-CHANNELS = c
+# c = np.split(np.arange(54),6)
+# c = np.concatenate([c[0],c[2]])
+# CHANNELS = c
 
 train_dataset = EEGDataset(subject_splits=TRAIN_SPLIT,
                     dataset=None,
                     save_paths=[REAL_DATA],
-                    dataset_type=CSP_subject_dataset,
+                    dataset_type=subject_dataset,
                     channels=CHANNELS,
                     sanity_check=False,
                     length=2.05)
@@ -99,7 +99,7 @@ print(train_dataset.data[0].shape)
 network_yaml["signal_length"] = train_dataset.data[0].shape[-1]
 network_yaml["signal_channel"] = train_dataset.data[0].shape[1]
 print(network_yaml["signal_length"])
-with open("params_2024_03_28_22_46.json","r") as f:
+with open("best_tiny.json","r") as f:
     best_params = json.load(f)
 
 def generate_samples(fabric,
@@ -109,7 +109,7 @@ def generate_samples(fabric,
                      n_iter=20,
                      w=0):
     # it's a bit hard to predict memory consumption so splitting in mini-batches to be safe
-    num_samples = 200
+    num_samples = batch_size
     cond = 0
     if (condition == 0):
         cond = torch.zeros(num_samples, 1, network_yaml["signal_length"]).to(DEVICE)
@@ -153,7 +153,7 @@ def check(train_split,
 	print(f"full x shape: {full_x.shape}")
 
 
-	real_acc = test_classifier.fit()
+	real_acc = test_classifier.fit(preprocess=True)
 
 	print(f"reaching an accuracy of {real_acc} without fake data")
 
@@ -168,7 +168,7 @@ def check(train_split,
 								channels=channels,
 								length=2.05)
 
-		acc = test_classifier.fit()
+		acc = test_classifier.fit(preprocess=True)
 
 		accuracies.append(acc)
 					
@@ -194,7 +194,7 @@ def diffusion(fabric,
         decay_max = 2
         activation_type = "leaky_relu"
         use_fft_conv = kernel_size * (2 ** (num_scales - 1)) >= 100
-        num_timesteps = 250
+        num_timesteps = NUM_TIMESTEPS
         schedule = "linear"
         # If the schedule is not cosine, we need to test the end_beta
         start_beta = 0.0001
@@ -274,8 +274,6 @@ def diffusion(fabric,
               
             # Train model
 
-        diffusion_model.load_state_dict(torch.load(os.path.join(save_path,"best_model.pt")))
-
         if train:
              
             for i in range(num_epochs):
@@ -346,7 +344,7 @@ def diffusion(fabric,
 
         Unet1D = UnetConfig(
             input_shape=(512),
-            input_channels=18,
+            input_channels=3,
             conv_op=nn.Conv1d,
             norm_op=nn.InstanceNorm1d,
             non_lin=nn.ReLU,
@@ -580,4 +578,4 @@ if __name__ == "__main__":
         wandb.init(project="slc-diffusion-mi", mode="disabled",
                 name=args.name)
         
-        k_fold(args.name,args.k_fold,9,w=0,train=False,train_real=None,generate=False)
+        k_fold(args.name,args.k_fold,9,w=0,train=False,train_real=None,generate=True)

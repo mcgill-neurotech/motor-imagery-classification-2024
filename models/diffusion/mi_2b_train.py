@@ -22,7 +22,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "../../"))
 sys.path.append("../../")
 
 from classification.classifiers import load_data, SimpleCSP
-from classification.loaders import EEGDataset, CSP_subject_dataset
+from classification.loaders import EEGDataset, CSP_subject_dataset, subject_dataset
 from ntd.networks import LongConv
 from ntd.diffusion_model import Diffusion
 from ntd.utils.kernels_and_diffusion_utils import WhiteNoiseProcess
@@ -89,15 +89,15 @@ for i in range(1,10):
 
 REAL_DATA = "../../data/2b_iv/raw"
 
-TRAIN_SPLIT = 6*[["train","test"]] + 3*[["train"]]
-TEST_SPLIT = 6*[[]] + 3* [["test"]]
+TRAIN_SPLIT = 9*[["train"]]
+TEST_SPLIT = 9*[["test"]]
 
 CHANNELS = [0,1,2]
 
 train_dataset = EEGDataset(subject_splits=TRAIN_SPLIT,
                     dataset=None,
                     save_paths=[REAL_DATA],
-                    dataset_type=CSP_subject_dataset,
+                    dataset_type=subject_dataset,
                     channels=CHANNELS,
                     sanity_check=False,
                     length=2.05)
@@ -168,7 +168,7 @@ def objective(trial):
     # lr = trial.suggest_loguniform('lr', 1e-5, 1e-3)
     lr = 6E-4
     # num_epochs = trial.suggest_int('num_epochs', 10, 150)
-    num_epochs = 180
+    num_epochs = 500
     # we don't need to optimize for number of epochs
     # we can just check for convergence
 
@@ -201,7 +201,7 @@ def objective(trial):
     # we should use a single scheduler that makes sense for prototyping and then optimize the scheduler for the best model
     # num_timesteps = trial.suggest_int('num_timesteps', 100, 1000, step=100)
     # schedule = trial.suggest_categorical('schedule', ["linear", "quad", "cosine"])
-    num_timesteps = 250
+    num_timesteps = 1024
     schedule = "linear"
     # If the schedule is not cosine, we need to test the end_beta
     start_beta = 0.0001
@@ -294,86 +294,83 @@ def objective(trial):
 
         print(f"diff: {epoch_loss - min(loss_per_epoch)}")
 
-        if epoch_loss - min(loss_per_epoch) >= min_delta*min(loss_per_epoch):
-            stop_counter += 1
-        if stop_counter > tolerance:
-            break
-    # except Exception as e:
-    #     print("Error during training.\nSkipping to next trial.")
-    #     print(e)
-    #     return previous_optim_val
+        trial.report(epoch_loss, i)
+    # # except Exception as e:
+    # #     print("Error during training.\nSkipping to next trial.")
+    # #     print(e)
+    # #     return previous_optim_val
         
     
-    # Evaluate synthetic data performance
-    generated_signals_zero = generate_samples(diffusion_model, condition=0)
-    generated_signals_one = generate_samples(diffusion_model, condition=1)
+    # # Evaluate synthetic data performance
+    # generated_signals_zero = generate_samples(diffusion_model, condition=0)
+    # generated_signals_one = generate_samples(diffusion_model, condition=1)
     
-    accuracies = []
+    # accuracies = []
     
-    test_classifier = SimpleCSP(train_split=TRAIN_SPLIT,
-                                test_split=TEST_SPLIT,
-                                dataset=None,
-                                save_paths=[REAL_DATA],
-                                channels=CHANNELS,
-                                length=2.05)
+    # test_classifier = SimpleCSP(train_split=TRAIN_SPLIT,
+    #                             test_split=TEST_SPLIT,
+    #                             dataset=None,
+    #                             save_paths=[REAL_DATA],
+    #                             channels=CHANNELS,
+    #                             length=2.05)
     
-    full_x,full_y = test_classifier.get_train()
+    # full_x,full_y = test_classifier.get_train()
 
-    print(f"full x shape: {full_x.shape}")
+    # print(f"full x shape: {full_x.shape}")
 
-    acc = test_classifier.fit()
+    # acc = test_classifier.fit()
 
-    print(f"reaching an accuracy of {acc} without fake data")
+    # print(f"reaching an accuracy of {acc} without fake data")
     
-    for real_fake_split in range(15, 46, 15):
+    # for real_fake_split in range(15, 46, 15):
         
-        # Train new classifier with a mix of generated and real data
+    #     # Train new classifier with a mix of generated and real data
         
-        # Change real_fake_split percent of the test_classifier data to generated signals
-        n = int(len(full_x) * real_fake_split / 100)
+    #     # Change real_fake_split percent of the test_classifier data to generated signals
+    #     n = int(len(full_x) * real_fake_split / 100)
 
-        shuffling = np.random.permutation(full_x.shape[0])
+    #     shuffling = np.random.permutation(full_x.shape[0])
 
-        split_x = full_x[shuffling]
-        split_y = full_y[shuffling]
-        split_x[0:n//2] = generated_signals_one[0:n//2]
-        split_y[0:n//2] = 1
+    #     split_x = full_x[shuffling]
+    #     split_y = full_y[shuffling]
+    #     split_x[0:n//2] = generated_signals_one[0:n//2]
+    #     split_y[0:n//2] = 1
 
-        split_x[n//2:n] = generated_signals_zero[0:n//2]
-        split_y[n//2:n] = 0
+    #     split_x[n//2:n] = generated_signals_zero[0:n//2]
+    #     split_y[n//2:n] = 0
 
-        print(f"split x shape: {split_x.shape}")
+    #     print(f"split x shape: {split_x.shape}")
 
-        acc = test_classifier.fit((split_x,split_y))
+    #     acc = test_classifier.fit((split_x,split_y))
 
-        accuracies.append(acc)
+    #     accuracies.append(acc)
     
-    best_split = np.argmax(accuracies)
-    best_accuracy = accuracies[best_split]
+    # best_split = np.argmax(accuracies)
+    # best_accuracy = accuracies[best_split]
 
-    # Log results
-    wandb.log({"best_accuracy": best_accuracy,
-               "best_split":best_split,
-               "trial":trial.number},)
+    # # Log results
+    # wandb.log({"best_accuracy": best_accuracy,
+    #            "best_split":best_split,
+    #            "trial":trial.number},)
 
-    # There's not really a point in pruning at the end of the trial
-    trial.report(best_accuracy, num_epochs)
-    if trial.should_prune():
-        raise optuna.exceptions.TrialPruned()
+    # # There's not really a point in pruning at the end of the trial
+    # trial.report(best_accuracy, num_epochs)
+    # if trial.should_prune():
+    #     raise optuna.exceptions.TrialPruned()
     
-    previous_optim_val = best_accuracy
+    # previous_optim_val = best_accuracy
     
-    return best_accuracy 
+    return min(loss_per_epoch)
 
 if __name__ == "__main__":
 
     # BAYESIAN OPTIMIZATION
     # Can modify pruner as necessary (n_startup_trials refers to the number of trials
     # before pruning starts. n_warmup_steps refers to the number of epochs before pruning)
-    pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=20)
+    pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=15)
     sampler = optuna.samplers.TPESampler(seed=10)
-    study = optuna.create_study(direction="maximize", pruner=pruner,sampler=sampler)
-    study.optimize(objective, n_trials=25)
+    study = optuna.create_study(direction="minimize", pruner=pruner,sampler=sampler)
+    study.optimize(objective, n_trials=50)
 
     # Analyze results
     print(f"Best trial: {study.best_trial.params}")

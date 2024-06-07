@@ -26,7 +26,7 @@ sys.path.append("../../../motor-imagery-classification-2024/")
 from classification.loaders import EEGDataset,load_data
 from models.unet.eeg_unets import Unet,UnetConfig, BottleNeckClassifier, Unet1D
 from classification.classifiers import DeepClassifier , SimpleCSP, k_fold_splits
-from classification.loaders import subject_dataset
+from classification.loaders import subject_dataset, CSP_subject_dataset
 from ntd.networks import SinusoidalPosEmb
 from ntd.diffusion_model import Diffusion
 from ntd.utils.kernels_and_diffusion_utils import WhiteNoiseProcess
@@ -55,16 +55,18 @@ END_BETA = 8E-2
 DIFFUSION_NUM_EPOCHS = 100 if not DEBUG else 1
 DIFFUSION_BATCH_SIZE = 64
 CLASSIFICATION_MAX_EPOCHS = 150 if not DEBUG else 1
-CHANNELS = [0,1,2]
+c = np.split(np.arange(54),6)
+c = np.concatenate([c[0],c[2]])
+CHANNELS = c
 
-dataset = {}
+RAW_DATASET = {}
 for i in range(1,10):
     mat_train,mat_test = load_data("../../data/2b_iv",i)
-    dataset[f"subject_{i}"] = {"train":mat_train,"test":mat_test}
+    RAW_DATASET[f"subject_{i}"] = {"train":mat_train,"test":mat_test}
 
-REAL_DATA = "../../data/2b_iv/raw"
+REAL_DATA = "../../data/2b_iv/csp"
 
-SAVE_PATH = "../../saved_models"
+SAVE_PATH = "../../saved_models/csp"
 
 def generate_samples(fabric,
                      diffusion_model, 
@@ -179,8 +181,8 @@ def check(train_split,
 	test_classifier = SimpleCSP(train_split=train_split,
 								test_split=test_split,
 								dataset=None,
-								save_paths=[REAL_DATA],
-								channels=channels,
+								save_paths=["../../data/2b_iv/raw"],
+								channels=[0,2],
 								length=2.05)
 
 	full_x,full_y = test_classifier.get_train()
@@ -203,7 +205,7 @@ def check(train_split,
 								channels=channels,
 								length=2.05)
 
-		acc = test_classifier.fit(preprocess=True)
+		acc = test_classifier.fit(preprocess=False)
 
 		accuracies.append(acc)
 					
@@ -224,13 +226,13 @@ def train_classification(fabric,
 	
 	deep_clf = DeepClassifier(
 		model=unet,
-		save_paths=["../../data/2b_iv/raw/"],
+		save_paths=[REAL_DATA],
 		fake_data=fake_paths,
 		train_split=train_split,
 		test_split=test_split,
 		fake_percentage=fake_percentage,
 		dataset=None,
-		dataset_type=subject_dataset,
+		dataset_type=CSP_subject_dataset,
 		length=2.05,
 		index_cutoff=512
 	)
@@ -243,8 +245,7 @@ def train_classification(fabric,
 			 optimizer=None,
 			 stop_threshold=10,
 			 log=True,
-			 id=f"subject_{subject_id}_percentage_{fake_percentage}_weight_{w}",
-			 test=True)
+			 id=f"subject_{subject_id}_percentage_{fake_percentage}_weight_{w}")
 	
 	if fine_tune:
 		print("\n---\nFine-tuning model\n---\n")
@@ -254,7 +255,7 @@ def train_classification(fabric,
 			unet.class_embed,]
 
 		to_optimize = [{"params":i.parameters(),
-			"lr":CNN_LR,
+			"lr":2E-5,
 			"weight_decay":1E-4} for i in to_fine_tune]
 
 		to_optimize.append({"params":unet.auxiliary_clf.parameters(),
@@ -275,9 +276,7 @@ def train_classification(fabric,
 				optimizer=optimizer,
 				stop_threshold=10,
 				log=True,
-				id=f"subject_{subject_id}_percentage_{0}",
-				test=True,
-				setup_test=False)
+				id=f"subject_{subject_id}_percentage_{0}")
 		
 		return with_fake,without_fake
 	else:
@@ -299,7 +298,7 @@ def loso_trial(fabric,
 		class_dim=12,
 		num_classes=2,
 		input_shape=(512),
-		input_channels=3,
+		input_channels=18,
 		conv_op=nn.Conv1d,
 		norm_op=nn.InstanceNorm1d,
 		non_lin=nn.ReLU,
@@ -324,7 +323,7 @@ def loso_trial(fabric,
 	train_set = EEGDataset(subject_splits=train_split,
                     dataset=None,
                     save_paths=[REAL_DATA],
-                    dataset_type=subject_dataset,
+                    dataset_type=CSP_subject_dataset,
                     channels=CHANNELS,
                     sanity_check=False,
                     length=2.05)
@@ -338,6 +337,8 @@ def loso_trial(fabric,
 
 	classifier = BottleNeckClassifier((2048,1024),)
 	unet = DiffusionUnet(UnetDiff1D,classifier)
+
+	print(ModelSummary(unet))
 
 	noise_sampler = WhiteNoiseProcess(1.0, 512)
 
@@ -390,25 +391,23 @@ def loso_trial(fabric,
 
 	fake_paths = [ones_path,zeros_path]
 
-	# csp_real,accuracies = check(train_split=train_split,
-	# 					test_split=test_split,
-	# 					fake_paths=fake_paths,
-	# 					channels=CHANNELS)
+	csp_real,accuracies = check(train_split=train_split,
+						test_split=test_split,
+						fake_paths=fake_paths,
+						channels=CHANNELS)
 	
-	# max_acc = np.argmax(accuracies)
-	# print(f"Reaching a maximal accuracy of {accuracies[max_acc]} for CSP using {(max_acc+1)*25}% fake vs {csp_real}")	
+	max_acc = np.argmax(accuracies)
+	print(f"Reaching a maximal accuracy of {accuracies[max_acc]} for CSP using {(max_acc+1)*25}% fake vs {csp_real}")	
 
-	# results = {"accuracies_csp":accuracies}
-	# results["csp_real"] = csp_real
-
-	results = {}
+	results = {"accuracies_csp":accuracies}
+	results["csp_real"] = csp_real
 
 	cnn_results = {}
 
 	if train_real is not None:
 		print(f"Training without fake data: {train_real}")
 
-	for idx,p in enumerate([0.5]):
+	for idx,p in enumerate([0.5,1]):
 
 		train_real = train_real if train_real is not None else (idx==0)
 
@@ -418,7 +417,6 @@ def loso_trial(fabric,
 			unet.load_state_dict(torch.load(os.path.join(save_path,f"unet_state_dict_{subject_id}.pt")))
 
 		if train_real:
-			print("Training both real and fake")
 			fake,real = train_classification(fabric=fabric,
 									unet=unet,
 									fake_percentage=p,
@@ -495,7 +493,7 @@ if __name__ == "__main__":
 
 	args = parser.parse_args() 
 
-	wandb.init(project="cnn-diffusion-mi", mode="online",
+	wandb.init(project="cnn-diffusion-mi", mode="disabled",
 			name=args.name)
 	
 	splits = k_fold_splits(args.k_fold,n_participants=9,leave_out=False)
@@ -503,10 +501,4 @@ if __name__ == "__main__":
 	k_fold(experiment_name=args.name,
 		k=args.k_fold,
 		n=9,
-		splits=splits,w=15,train=False,train_real=None,generate=False,
-		fine_tune=False)
-	k_fold(experiment_name=args.name,
-		k=args.k_fold,
-		n=9,
-		splits=splits,w=15,train=False,train_real=None,generate=False,
-		fine_tune=True)
+		splits=splits,w=15,train=False,train_real=None,generate=False)
