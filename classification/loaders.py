@@ -207,7 +207,7 @@ class EEGDataset(Dataset):
 				 dataset:Optional[dict] = None,
 				 save_paths:Optional[list[str]] = None,
 				 fake_data=None,
-				 dataset_type: Optional[subject_dataset] = None,
+				 subject_dataset_type: Optional[subject_dataset] = None,
 				 fake_percentage:float = 0.5,
 				 fs:float = 250, 
 				 t_baseline:float = 0, 
@@ -222,7 +222,7 @@ class EEGDataset(Dataset):
 			subject_splits: splits to use for train and test
 			save_path: path(s) to save/load pre-processed data
 			dataset: dictionnary of train and test splits for all subjects
-			dataset_type: type of subject dataset for pre-processing
+			subject_dataset_type: type of subject dataset for pre-processing
 			pickled: load pickled dataset instead of saving
 			fs: sampling frequency
 			t_baseline: start of motor imagery trial
@@ -243,7 +243,7 @@ class EEGDataset(Dataset):
 		if dataset is None:
 			self.data = self.load_data(save_paths,subject_splits,channels)
 		else:
-			self.save_dataset(dataset,save_paths[0],dataset_type)
+			self.save_dataset(dataset,save_paths[0],subject_dataset_type)
 			self.data = self.load_data(save_paths,subject_splits,channels)
 
 		if fake_data is not None:
@@ -289,7 +289,7 @@ class EEGDataset(Dataset):
 	def save_dataset(self,
 				  dataset:dict,
 				  path:str,
-				  dataset_type:subject_dataset):
+				  subject_dataset_type:subject_dataset):
 		
 		"""
 		Function for pre-processing a dataset and saving it
@@ -298,7 +298,7 @@ class EEGDataset(Dataset):
 		Args:
 			dataset: dictionnary of train and test splits for all subjects
 			path: path to save the pre-processed data
-			dataset_type: type of subject dataset for pre-processing
+			subject_dataset_type: type of subject dataset for pre-processing
 
 		Return:
 			None
@@ -309,7 +309,7 @@ class EEGDataset(Dataset):
 		
 		for idx,(k,subject) in enumerate(dataset.items()):
 			for split in ["train","test"]:
-				set = dataset_type(subject[split],self.fs,self.t_baseline,self.t_epoch)
+				set = subject_dataset_type(subject[split],self.fs,self.t_baseline,self.t_epoch)
 				epochs = np.float32(set.epochs)
 				cues = set.cues
 				np.save(os.path.join(path,f"subject_{idx}_{split}_epochs.npy"),epochs)
@@ -397,7 +397,7 @@ if __name__ == "__main__":
 	train_dataset = EEGDataset(subject_splits=train_split,
 					  dataset=dataset,
 					  save_paths=[save_path],
-					  dataset_type=subject_dataset,
+					  subject_dataset_type=subject_dataset,
 					  channels=channels,
 					  sanity_check=True,
 					  length=2.05)

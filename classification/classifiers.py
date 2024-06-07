@@ -395,7 +395,7 @@ class DeepClassifier:
                  train_split:list[list[str]],
                  test_split:list[list[str]],
                  dataset:Optional[dict] = None,
-				 dataset_type: Optional[subject_dataset] = None,
+				 subject_dataset_type: Optional[subject_dataset] = None,
                  channels:Iterable = np.array([0,1,2]),
                  fake_data: Optional[list[str]] = None,
                  fake_percentage: float = 0.5,
@@ -406,12 +406,13 @@ class DeepClassifier:
 				 start:float = 3.5,
 				 length:float = 2,
                  index_cutoff:int = 256,
-                 sanity_check:bool = False):
+                 sanity_check:bool = False,
+                 **dataset_kwargs):
         self.fs = fs
         self.t_epoch = t_epoch
         self.t_baseline = t_baseline
         self.batch_size = batch_size
-        self.dataset_type = dataset_type
+        self.subject_dataset_type = subject_dataset_type
         self.start = start
         self.length = length
         self.channels = channels
@@ -425,24 +426,9 @@ class DeepClassifier:
         self.setup_dataloaders(use_fake=True,
                                sanity_check=sanity_check,
                                fake_percentage=fake_percentage,
-                               test=True)
+                               test=True,
+                               **dataset_kwargs)
         
-        # self.train_loader = self.get_loader(batch_size=self.batch_size,
-        #                                     subject_splits=self.train_split,
-        #                                     dataset=self.dataset,
-        #                                     fake_data=self.fake_data,
-        #                                     save_paths=self.save_paths,
-        #                                     dataset_type=self.dataset_type,
-        #                                     shuffle=True,
-        #                                     sanity_check=sanity_check)
-
-        # self.val_loader = self.get_loader(batch_size=self.batch_size,
-        #                                     subject_splits=self.test_split,
-        #                                     dataset=self.dataset,
-        #                                     save_paths=self.save_paths,
-        #                                     dataset_type=self.dataset_type,
-        #                                     shuffle=False,
-        #                                     sanity_check=sanity_check)
         self.model = model
         self.init_weights = copy.deepcopy(self.model.state_dict())
         self.index_cutoff = index_cutoff
@@ -453,21 +439,24 @@ class DeepClassifier:
                    subject_splits:list[list[str]],
                    fake_data: Optional[list[str]] = None,
                    dataset:Optional[dict] = None,
-                   dataset_type: Optional[subject_dataset] = None,
+                   subject_dataset_type: Optional[subject_dataset] = None,
+                   dataset_type: Optional[EEGDataset] = EEGDataset,
                    shuffle=True,
                    sanity_check=False,
                    fake_percentage=0.5,
-                   test=False):
+                   test=False,
+                   **dataset_kwargs):
         
-        dset = EEGDataset(subject_splits=subject_splits,dataset=dataset,
+        dset = dataset_type(subject_splits=subject_splits,dataset=dataset,
                           save_paths=save_paths,
-                          dataset_type=dataset_type,
+                          subject_dataset_type=subject_dataset_type,
                           fake_data=fake_data,
                           fake_percentage=fake_percentage,
                           fs=self.fs,t_baseline=self.t_baseline,
                           t_epoch=self.t_epoch,start=self.start,
                           length=self.length,channels=self.channels,
-                          sanity_check=sanity_check)
+                          sanity_check=sanity_check,
+                          **dataset_kwargs)
         if test:
             n_val = int(len(dset)*0.5)
             n_test = len(dset)-n_val
@@ -485,7 +474,8 @@ class DeepClassifier:
                           use_fake=True,
                           sanity_check=False,
                           fake_percentage=0.5,
-                          test=False):
+                          test=False,
+                          **dataset_kwargs):
         
         if splits is not None:
             train_split = splits[0]
@@ -501,31 +491,34 @@ class DeepClassifier:
                                             dataset=self.dataset,
                                             fake_data=fake_data,
                                             save_paths=self.save_paths,
-                                            dataset_type=self.dataset_type,
+                                            subject_dataset_type=self.subject_dataset_type,
                                             shuffle=True,
                                             sanity_check=sanity_check,
-                                            fake_percentage=fake_percentage)
+                                            fake_percentage=fake_percentage,
+                                            **dataset_kwargs)
 
         if test:
             self.val_loader,self.test_loader = self.get_loader(batch_size=self.batch_size,
                                             subject_splits=test_split,
                                             dataset=self.dataset,
                                             save_paths=self.save_paths,
-                                            dataset_type=self.dataset_type,
+                                            subject_dataset_type=self.subject_dataset_type,
                                             shuffle=False,
                                             sanity_check=sanity_check,
                                             fake_percentage=fake_percentage,
-                                            test=test)
+                                            test=test,
+                                            **dataset_kwargs)
     
         else:
             self.val_loader = self.get_loader(batch_size=self.batch_size,
                                                 subject_splits=test_split,
                                                 dataset=self.dataset,
                                                 save_paths=self.save_paths,
-                                                dataset_type=self.dataset_type,
+                                                subject_dataset_type=self.subject_dataset_type,
                                                 shuffle=False,
                                                 sanity_check=sanity_check,
-                                                fake_percentage=fake_percentage)
+                                                fake_percentage=fake_percentage,
+                                                **dataset_kwargs)
     
     def sample_batch(self):
         return next(iter(self.train_loader))[0][:, :, :self.index_cutoff]
@@ -723,7 +716,8 @@ class SimpleCSP:
                  dataset:Optional[dict] = None,
                  fake_paths=None,
                  fake_percentage=0.5,
-				 dataset_type: Optional[subject_dataset] = None,
+                 dataset_type: Optional[EEGDataset] = EEGDataset,
+				 subject_dataset_type: Optional[subject_dataset] = None,
                  channels:Iterable = np.array([0,1,2]),
                  fs:float = 250, 
 				 t_baseline:float = 0, 
@@ -735,13 +729,13 @@ class SimpleCSP:
         self.fs = fs
         self.t_epoch = t_epoch
         self.t_baseline = t_baseline
-        self.dataset_type = dataset_type
+        self.subject_dataset_type = subject_dataset_type
         self.start = start
         self.length = length
         self.channels = channels
 
-        self.train_set = EEGDataset(subject_splits=train_split,dataset=dataset,
-                          save_paths=save_paths,dataset_type=dataset_type,
+        self.train_set = dataset_type(subject_splits=train_split,dataset=dataset,
+                          save_paths=save_paths,subject_dataset_type=subject_dataset_type,
                           fake_data=fake_paths,
                           fake_percentage=fake_percentage,
                           fs=self.fs,t_baseline=self.t_baseline,
@@ -749,8 +743,8 @@ class SimpleCSP:
                           length=self.length,channels=self.channels,
                           sanity_check=sanity_check)
         
-        self.test_set = EEGDataset(subject_splits=test_split,dataset=dataset,
-                          save_paths=save_paths,dataset_type=dataset_type,
+        self.test_set = dataset_type(subject_splits=test_split,dataset=dataset,
+                          save_paths=save_paths,subject_dataset_type=subject_dataset_type,
                           fake_data=None,
                           fake_percentage=0,
                           fs=self.fs,t_baseline=self.t_baseline,
@@ -873,7 +867,7 @@ if __name__ == "__main__":
                          test_split=test_split,
                          dataset=None,
                          save_paths=[save_path],
-                         dataset_type=CSP_subject_dataset,
+                         subject_dataset_type=CSP_subject_dataset,
                          channels=channels,
                          batch_size=32,
                          fs=250,

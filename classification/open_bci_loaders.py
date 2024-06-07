@@ -1,9 +1,13 @@
+import sys
+
+sys.path.append("../../motor-imagery-classification-2024/")
+
 import os
 import pandas as pd
 import numpy as np
 from einops import rearrange
 from scipy.signal import filtfilt, iirnotch, butter
-from loaders import subject_dataset,EEGDataset
+from classification.loaders import subject_dataset,EEGDataset
 from typing import Optional, Iterable
 import matplotlib.pyplot as plt
 from sklearn.svm import SVC
@@ -16,7 +20,7 @@ def load_files(folder):
 	subjects = []
 	files = os.listdir(folder)
 	for f in files:
-		df = pd.read_csv(os.path.join("complete_data",f))
+		df = pd.read_csv(os.path.join(folder,f))
 		subject = str.split(f,"_")[-1]
 		if subject not in d.keys():
 			d[subject] = [df]
@@ -32,10 +36,10 @@ def _get_epochs(df,
 				n_samples_baseline,
 				n_samples,
 				epochs = [],
-				channels=["ch1","ch2","ch3","ch4"]):
+				subject_channels=["ch1","ch2","ch3","ch4"]):
 		for i in indices:
 			# length x n_channels
-			epoch = df.loc[i-n_samples_baseline:i+n_samples][channels]
+			epoch = df.loc[i-n_samples_baseline:i+n_samples][subject_channels]
 			epochs.append(epoch)
 		return epochs
 
@@ -43,7 +47,7 @@ def get_epochs(dfs,
 			   fs,
 			   t_epoch,
 			   t_baseline=0,
-			   channels=["ch1","ch2","ch3","ch4"]):
+			   subject_channels=["ch1","ch2","ch3","ch4"]):
 
 	left_epochs = []
 	right_epochs = []
@@ -60,10 +64,10 @@ def get_epochs(dfs,
 		right_indices = indices[df["right"] == 1]
 
 		left_epochs = _get_epochs(df,left_indices,n_samples_baseline,
-							n_samples,left_epochs,channels)
+							n_samples,left_epochs,subject_channels)
 		
 		right_epochs = _get_epochs(df,right_indices,n_samples_baseline,
-							n_samples,right_epochs,channels)
+							n_samples,right_epochs,subject_channels)
 		
 	left_epochs = np.stack(left_epochs,0)
 	right_epochs = np.stack(right_epochs,0)
@@ -76,10 +80,10 @@ def sliding_window_view(arr, window_size, step, axis):
 	return rearrange(strided,"n e ... -> (n e) ...")
 
 def subject_epochs(dfs,
-				   channels=["ch2","ch3","ch4","ch5"],
+				   subject_channels=["ch2","ch3","ch4","ch5"],
 				   stride=25,
 				   epoch_length=512):
-	left,right = get_epochs(dfs,256,8,0,channels=channels)
+	left,right = get_epochs(dfs,256,8,0,subject_channels=subject_channels)
 	n,l,d = left.shape
 	left_epochs = sliding_window_view(left,epoch_length,stride,1)
 	right_epochs = sliding_window_view(right,epoch_length,stride,1)
@@ -93,7 +97,7 @@ class OpenBCISubject(subject_dataset):
 
 	def __init__(self, 
 			  dfs,
-			  channels,
+			  subject_channels,
 			  fs=256,
 			  t_baseline=0,
 			  t_epoch=8,
@@ -106,7 +110,7 @@ class OpenBCISubject(subject_dataset):
 
 		self.dfs = dfs
 
-		self.epochs,self.cues = subject_epochs(dfs,channels,stride=stride,
+		self.epochs,self.cues = subject_epochs(dfs,subject_channels,stride=stride,
 										 epoch_length=epoch_length)
 		self.epochs,self.cues = self.epoch_preprocess(self.epochs,self.cues)
 
@@ -134,7 +138,7 @@ class OpenBCIDataset(EEGDataset):
 		fs:float = 256, 
 		t_baseline:float = 0, 
 		t_epoch:float = 8,
-		pick_channels:Iterable = np.array([0,1,2]),
+		channels:Iterable = np.array([0,1,2]),
 		sanity_check:bool=False,
 		**kwargs,):
 
@@ -145,11 +149,11 @@ class OpenBCIDataset(EEGDataset):
 
 		if dataset is None:
 			print("Loading saved data")
-			self.data = self.load_data(save_paths,subject_splits,pick_channels)
+			self.data = self.load_data(save_paths,subject_splits,channels)
 		else:
 			print("Saving new data")
 			self.save_dataset(dataset,save_paths[0],dataset_type,**kwargs)
-			self.data = self.load_data(save_paths,subject_splits,pick_channels)
+			self.data = self.load_data(save_paths,subject_splits,channels)
 
 		if fake_data is not None:
 			print("we have fake data")
@@ -181,7 +185,7 @@ class OpenBCIDataset(EEGDataset):
 	def load_data(self,
 			   paths,
 			   subject_splits,
-			   pick_channels):
+			   channels):
 		
 		epochs = []
 		cues = []
@@ -193,7 +197,7 @@ class OpenBCIDataset(EEGDataset):
 					epochs.append(np.load(os.path.join(path,f"subject_{idx}_{split}_epochs.npy")))
 					cues.append(np.load(os.path.join(path,f"subject_{idx}_{split}_cues.npy")))
 
-		epochs = rearrange(np.concatenate(epochs,0),"n t d -> n d t")[:,pick_channels,:]
+		epochs = rearrange(np.concatenate(epochs,0),"n t d -> n d t")[:,channels,:]
 		cues = np.concatenate(cues,0)
 
 		print(epochs.shape)
@@ -227,12 +231,12 @@ class CSPOpenBCISubject(OpenBCISubject):
 
 	def __init__(self, 
 			  dfs,
-			  channels,
+			  subject_channels,
 			  fs=256,
 			  t_baseline=0,
 			  t_epoch=8,
 			  **kwargs):
-		super().__init__(dfs,channels, fs, t_baseline, t_epoch,**kwargs)
+		super().__init__(dfs,subject_channels, fs, t_baseline, t_epoch,**kwargs)
 
 	def epoch_preprocess(self, x, y, notch_freq=60, low=4, high=50):
 		x,y = super().epoch_preprocess(x, y, notch_freq, low, high)
@@ -262,11 +266,12 @@ class CSPOpenBCISubject(OpenBCISubject):
 		return x
 	
 if __name__ == "__main__":
-	files = load_files("complete_data")
+	print(f"path {os.getcwd()}")
+	files = load_files("data/collected_data")
 	train_split = 2*[["train"]]
 	test_split = 2*[["test"]]
 	save_path = os.path.join("processed","raw")
-	csp_save_path = os.path.join("processed","csp")
+	csp_save_path = os.path.join("processed","data/collected_data/csp")
 
 	train_csp_dataset = OpenBCIDataset(
 		subject_splits=train_split,
@@ -274,8 +279,8 @@ if __name__ == "__main__":
 		save_paths=[csp_save_path],
 		fake_data=None,
 		dataset_type=CSPOpenBCISubject,
-		pick_channels=np.arange(0,2*9),
-		channels=["ch2","ch5"],
+		channels=np.arange(0,2*9),
+		subject_channels=["ch2","ch5"],
 		stride=128,
 		epoch_length=512
 	)
@@ -286,8 +291,8 @@ if __name__ == "__main__":
 		save_paths=[csp_save_path],
 		fake_data=None,
 		dataset_type=CSPOpenBCISubject,
-		pick_channels=np.arange(0,2*9),
-		channels=["ch2","ch5"],
+		channels=np.arange(0,2*9),
+		subject_channels=["ch2","ch5"],
 		stride=128,
 		epoch_length=512
 	)
