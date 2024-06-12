@@ -60,28 +60,6 @@ with open(os.path.join(CONF_PATH, "network.yaml"), "r") as f:
 with open(os.path.join(CONF_PATH, "diffusion.yaml"), "r") as f:
     diffusion_yaml = yaml.safe_load(f)
 
-# Load data
-### PREPROCESSES THE DATA USING THE CSP CLASSIFIER ###
-#idataset_mat_diffusion = {}
-#for i in range(1,8):
-#	mat_train,mat_test = load_data(DATA_PATH,i)
-#	dataset_mat_diffusion[f"subject_{i}"] = {"train":mat_train,"test":mat_test}
-#  
-#dataset_mat_classifier = {}
-#for i in range(8,10):
-#	mat_train,mat_test = load_data(DATA_PATH,i)
-#	dataset_mat_classifier[f"subject_{i}"] = {"train":mat_train,"test":mat_test}
-#
-#diffusion_classifier = CSPClassifier(dataset_mat_diffusion, t_baseline=classifier_yaml["t_baseline"], t_epoch=classifier_yaml["t_epoch"])
-#diffusion_classifier.set_epoch(3.5,2)
-#signal_shape = diffusion_classifier.get_shape()
-#print(f"signal shape: {signal_shape}")
-#network_yaml["signal_length"] = signal_shape[-1]
-#network_yaml["signal_channel"] = signal_shape[1]
-#print(network_yaml["signal_length"])
-
-### LOADS THE PREPROCESSED DATA ###
-# Load preprocessed pickled data
 dataset = {}
 for i in range(1,10):
     mat_train,mat_test = load_data("../../data/2b_iv",i)
@@ -97,7 +75,7 @@ CHANNELS = [0,1,2]
 train_dataset = EEGDataset(subject_splits=TRAIN_SPLIT,
                     dataset=None,
                     save_paths=[REAL_DATA],
-                    dataset_type=subject_dataset,
+                    subject_dataset_type=subject_dataset,
                     channels=CHANNELS,
                     sanity_check=False,
                     length=2.05)
@@ -161,62 +139,37 @@ def generate_samples(diffusion_model,
 # Objective function for Bayesian Optimization
 previous_optim_val = 0 # Keep the last value in case of an assertion error
 def objective(trial):
-    # THE FOLLOWING HYPERPARAMETERS ARE THE ONES WE ARE TRYING TO TEST AND OPTIMIZE
-    # Training hyperparameters
 
     print(f"Starting trial {trial.number}")
-    # lr = trial.suggest_loguniform('lr', 1e-5, 1e-3)
-    lr = 6E-4
-    # num_epochs = trial.suggest_int('num_epochs', 10, 150)
-    num_epochs = 500
-    # we don't need to optimize for number of epochs
-    # we can just check for convergence
 
-    # Network hyperparameters
-    # Note that kernel sizes are same
+    lr = 6E-4
+
+    num_epochs = 500
+
     time_dim = 12
     hidden_channel = trial.suggest_int('hidden_channel', 16, 64, step=16)
 
     kernel_size = trial.suggest_int('kernel_size', 35, 65, step=10) 
     num_scales = trial.suggest_int('num_scales', 2, 4, step=1)
 
-    # decay_min = trial.suggest_int('decay_min', 1, 4, step=1)
-    # decay_max = trial.suggest_int('decay_max', decay_min, 4, step=1)
-
-    # the paper mostly sticks with constant decay
     decay_min = 2
     decay_max = 2
-
-    # we can probably keep the activation type constant, it shouldn't interplay with other parameters that much at this scale
     
-    # activation_type = trial.suggest_categorical('activation_type', ["gelu", "leaky_relu"])
     activation_type = "leaky_relu"
-    # use_fft_conv = trial.suggest_categorical('use_fft_conv', [True, False]) 
-    # FFT Conv isn't a parameter it's just the algorithm used to compute the convolution
+
     # https://github.com/fkodom/fft-conv-pytorch
     use_fft_conv = kernel_size * (2 ** (num_scales - 1)) >= 100
 
-    # Diffusion hyperparameters
-    # Note that start_beta seems to always be 0.001 so we don't need to test that
-    # we should use a single scheduler that makes sense for prototyping and then optimize the scheduler for the best model
-    # num_timesteps = trial.suggest_int('num_timesteps', 100, 1000, step=100)
-    # schedule = trial.suggest_categorical('schedule', ["linear", "quad", "cosine"])
     num_timesteps = 1024
     schedule = "linear"
-    # If the schedule is not cosine, we need to test the end_beta
     start_beta = 0.0001
     end_beta = 0.08
-    # if schedule != "cosine":
-    #     start_beta = diffusion_yaml["start_beta"]
-    #     end_beta = trial.suggest_float('end_beta', 0.01, 0.08, step=0.01)
-        
-    # Load data
+
     train_loader = DataLoader(
         train_dataset,
         train_yaml["batch_size"]
     )
 
-    # Initialize model
     network = LongConv(
         signal_length=network_yaml["signal_length"],
         signal_channel=network_yaml["signal_channel"], # The CSP classifier components
@@ -246,7 +199,6 @@ def objective(trial):
         end_beta=end_beta,
     ).to(DEVICE)
 
-    # Optimizer (also testing learning rate here)
     optimizer = optim.AdamW(
         network.parameters(),
         lr=lr,
@@ -261,8 +213,6 @@ def objective(trial):
     min_delta = 0.05
     tolerance = 30
 
-    # try:
-    # Train model
     print(f"training with kernel size {kernel_size}, scale: {num_scales}, hidden_dim: {hidden_channel}")
     for i in range(num_epochs):
         
@@ -270,8 +220,7 @@ def objective(trial):
         for batch in train_loader:
             
             with fabric.autocast():
-            # Repeat the cue signal to match the signal length
-                # print(batch["signal"].shape)
+
                 signal,cue = batch
                 cond = cue.unsqueeze(-1).unsqueeze(-1).repeat(1, 1, network_yaml["signal_length"]).to(DEVICE)
                 
@@ -295,78 +244,11 @@ def objective(trial):
         print(f"diff: {epoch_loss - min(loss_per_epoch)}")
 
         trial.report(epoch_loss, i)
-    # # except Exception as e:
-    # #     print("Error during training.\nSkipping to next trial.")
-    # #     print(e)
-    # #     return previous_optim_val
-        
-    
-    # # Evaluate synthetic data performance
-    # generated_signals_zero = generate_samples(diffusion_model, condition=0)
-    # generated_signals_one = generate_samples(diffusion_model, condition=1)
-    
-    # accuracies = []
-    
-    # test_classifier = SimpleCSP(train_split=TRAIN_SPLIT,
-    #                             test_split=TEST_SPLIT,
-    #                             dataset=None,
-    #                             save_paths=[REAL_DATA],
-    #                             channels=CHANNELS,
-    #                             length=2.05)
-    
-    # full_x,full_y = test_classifier.get_train()
-
-    # print(f"full x shape: {full_x.shape}")
-
-    # acc = test_classifier.fit()
-
-    # print(f"reaching an accuracy of {acc} without fake data")
-    
-    # for real_fake_split in range(15, 46, 15):
-        
-    #     # Train new classifier with a mix of generated and real data
-        
-    #     # Change real_fake_split percent of the test_classifier data to generated signals
-    #     n = int(len(full_x) * real_fake_split / 100)
-
-    #     shuffling = np.random.permutation(full_x.shape[0])
-
-    #     split_x = full_x[shuffling]
-    #     split_y = full_y[shuffling]
-    #     split_x[0:n//2] = generated_signals_one[0:n//2]
-    #     split_y[0:n//2] = 1
-
-    #     split_x[n//2:n] = generated_signals_zero[0:n//2]
-    #     split_y[n//2:n] = 0
-
-    #     print(f"split x shape: {split_x.shape}")
-
-    #     acc = test_classifier.fit((split_x,split_y))
-
-    #     accuracies.append(acc)
-    
-    # best_split = np.argmax(accuracies)
-    # best_accuracy = accuracies[best_split]
-
-    # # Log results
-    # wandb.log({"best_accuracy": best_accuracy,
-    #            "best_split":best_split,
-    #            "trial":trial.number},)
-
-    # # There's not really a point in pruning at the end of the trial
-    # trial.report(best_accuracy, num_epochs)
-    # if trial.should_prune():
-    #     raise optuna.exceptions.TrialPruned()
-    
-    # previous_optim_val = best_accuracy
     
     return min(loss_per_epoch)
 
 if __name__ == "__main__":
 
-    # BAYESIAN OPTIMIZATION
-    # Can modify pruner as necessary (n_startup_trials refers to the number of trials
-    # before pruning starts. n_warmup_steps refers to the number of epochs before pruning)
     pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=15)
     sampler = optuna.samplers.TPESampler(seed=10)
     study = optuna.create_study(direction="minimize", pruner=pruner,sampler=sampler)

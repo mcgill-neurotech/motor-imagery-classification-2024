@@ -146,6 +146,7 @@ class OpenBCIDataset(EEGDataset):
 		self.t_baseline = t_baseline
 		self.t_epoch = t_epoch
 		self.fake_percentage = fake_percentage
+		self.save_paths = save_paths
 
 		if dataset is None:
 			print("Loading saved data")

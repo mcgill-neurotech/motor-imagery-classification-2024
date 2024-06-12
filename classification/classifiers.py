@@ -665,13 +665,16 @@ class DeepClassifier:
                   use_fake=True,
                   weight_decay=1E-4,
                   verbose=False,
-                  leave_out=False):
+                  leave_out=False,
+                  **dataset_kwargs):
         folds = k_fold_splits(k,n,leave_out)
         accuracies = []
         for fold in folds:
             self.setup_dataloaders(fold,use_fake)
-            self.train_loader = self.get_loader(self.dataset,fold[0],self.batch_size,True)
-            self.val_loader = self.get_loader(self.dataset,fold[1],self.batch_size,True)
+            self.train_loader = self.get_loader(self.dataset,fold[0],
+                                                self.batch_size,True,**dataset_kwargs)
+            self.val_loader = self.get_loader(self.dataset,fold[1],
+                                              self.batch_size,True,**dataset_kwargs)
             self.model.load_state_dict(self.init_weights)
             max_accuracy = self.fit(fabric,
                         num_epochs=20,

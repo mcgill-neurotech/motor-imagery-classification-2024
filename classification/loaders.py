@@ -215,7 +215,8 @@ class EEGDataset(Dataset):
 				 start:float = 3.5,
 				 length:float = 2,
 				 channels:Iterable = np.array([0,1,2]),
-				 sanity_check:bool=False):
+				 sanity_check:bool=False,
+				 **kwargs):
 		
 		"""
 		Args:
