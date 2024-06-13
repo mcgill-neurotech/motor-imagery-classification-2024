@@ -40,16 +40,16 @@ class DiffusionClf(lightning.LightningModule):
 class ClassificationHead(lightning.LightningModule):
 
 	def __init__(self,
-			  channels: Tuple[int],
+			  out_channels: Tuple[int],
 			  pool=None,
 			  **kwargs) -> None:
 		super().__init__()
 
 		self.mlp = nn.ModuleList()
-		for i in range(len(channels)-1):
-			self.mlp.append(nn.Linear(channels[i],channels[i+1]))
+		for i in range(len(out_channels)-1):
+			self.mlp.append(nn.Linear(out_channels[i],out_channels[i+1]))
 			self.mlp.append(nn.ReLU())
-		self.mlp.append(nn.Linear(channels[-1],2))
+		self.mlp.append(nn.Linear(out_channels[-1],2))
 		self.pool = pool
 
 	def forward(self,x):
@@ -108,3 +108,6 @@ class EEGNetHead(lightning.LightningModule):
 		x = rearrange(x,"b d1 d2 t -> b (d1 d2 t)")
 		x = self.out_proj(x)
 		return x
+	
+	def classify(self,x):
+		return self.forward(x)
